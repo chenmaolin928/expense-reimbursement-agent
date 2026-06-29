@@ -12,6 +12,8 @@ const inputText = ref('')
 const chatBox = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const streamingMessages = ref<any[]>([])
+const uploadedFiles = ref<string[]>([])
+const uploading = ref(false)
 
 onMounted(async () => {
   await chat.fetchSessions()
@@ -24,13 +26,21 @@ async function newChat() {
   const s = await chat.createSession()
   chat.messages = []
   streamingMessages.value = []
+  uploadedFiles.value = []
   chat.currentSessionId = s.id
 }
 
 async function selectSession(sid: string) {
   chat.currentSessionId = sid
   streamingMessages.value = []
+  uploadedFiles.value = []
   await chat.fetchMessages(sid)
+  // Show persisted messages
+  chat.messages.forEach((m) => {
+    streamingMessages.value.push({
+      role: m.role, content: m.content, tool_name: m.tool_name,
+    })
+  })
   scrollDown()
 }
 
@@ -39,11 +49,23 @@ async function send() {
   if (!text || !chat.currentSessionId) return
   inputText.value = ''
 
-  // Add user bubble locally
+  // Build full message with attachments
+  let fullText = text
+  if (uploadedFiles.value.length > 0) {
+    fullText = `[已上传文件: ${uploadedFiles.value.join(', ')}]\n${text}`
+  }
+  const attachments = [...uploadedFiles.value]
+  uploadedFiles.value = []
+
+  // Add user bubble (show what user actually typed)
   streamingMessages.value.push({ role: 'user', content: text })
 
+  // Add a single collapsible tool tracker
+  const toolTracker: any = { role: 'agent-status', tools: [], done: false }
+  streamingMessages.value.push(toolTracker)
+
   try {
-    const res = await chat.sendMessage(chat.currentSessionId, text)
+    const res = await chat.sendMessage(chat.currentSessionId, fullText, attachments)
     const reader = res.body?.getReader()
     if (!reader) return
 
@@ -60,6 +82,7 @@ async function send() {
         if (line.startsWith('data: ')) {
           const evt = JSON.parse(line.slice(6))
           if (evt.type === 'message' && evt.role === 'assistant') {
+            toolTracker.done = true
             const last = streamingMessages.value[streamingMessages.value.length - 1]
             if (last?.role === 'assistant') {
               last.content += evt.content || ''
@@ -67,17 +90,10 @@ async function send() {
               streamingMessages.value.push({ role: 'assistant', content: evt.content || '' })
             }
           } else if (evt.type === 'tool_call') {
-            streamingMessages.value.push({
-              role: 'tool', tool_name: evt.tool, status: 'calling',
-              content: `Calling ${evt.tool}...`,
-            })
+            toolTracker.tools.push({ name: evt.tool, status: 'running' })
           } else if (evt.type === 'tool_result') {
-            streamingMessages.value.push({
-              role: 'tool', tool_name: evt.tool, status: 'done',
-              content: `Done: ${evt.tool}`,
-            })
-          } else if (evt.type === 'thinking') {
-            // Skip for now
+            const t = toolTracker.tools.find((x: any) => x.name === evt.tool && x.status === 'running')
+            if (t) t.status = 'done'
           }
         }
       }
@@ -87,24 +103,23 @@ async function send() {
     console.error('Chat error:', e)
   }
 
-  // Reload session to get persisted messages
-  if (chat.currentSessionId) {
-    await chat.fetchMessages(chat.currentSessionId)
-    streamingMessages.value = []
-    chat.messages.forEach((m) => {
-      streamingMessages.value.push({
-        role: m.role, content: m.content, tool_name: m.tool_name,
-      })
-    })
-  }
+  // Reload persisted messages
+  await chat.fetchMessages(chat.currentSessionId)
   await chat.fetchSessions()
   scrollDown()
 }
 
-function handleFileUpload(e: Event) {
+async function handleFileUpload(e: Event) {
   const input = e.target as HTMLInputElement
   if (!input.files?.length || !chat.currentSessionId) return
-  chat.uploadFile(chat.currentSessionId, input.files[0])
+  uploading.value = true
+  try {
+    const path = await chat.uploadFile(chat.currentSessionId, input.files[0])
+    uploadedFiles.value.push(path)
+  } catch (e) {
+    console.error('Upload failed:', e)
+  }
+  uploading.value = false
   input.value = ''
 }
 
@@ -128,8 +143,8 @@ function logout() {
     <aside class="sidebar">
       <div class="sidebar-header">
         <h3>Chats</h3>
-        <button class="btn-new" @click="newChat">+ New</button>
       </div>
+      <button class="btn-new" @click="newChat">+ New Chat</button>
       <ul class="session-list">
         <li
           v-for="s in chat.sessions"
@@ -142,7 +157,7 @@ function logout() {
         </li>
       </ul>
       <div class="sidebar-footer">
-        <span class="user-role">{{ auth.role }}</span>
+        <span class="user-role">{{ auth.role }} | {{ auth.user?.username }}</span>
         <button class="btn-logout" @click="logout">Logout</button>
       </div>
     </aside>
@@ -151,27 +166,49 @@ function logout() {
     <main class="chat-main">
       <div class="chat-messages" ref="chatBox">
         <div v-if="!chat.currentSessionId" class="empty">
+          <div class="empty-icon">+</div>
           <p>Create a new chat to start</p>
+          <p class="empty-hint">You can ask about reimbursement policy or upload invoices</p>
         </div>
         <div
           v-for="(m, i) in streamingMessages"
           :key="i"
           :class="['msg', m.role]"
         >
-          <div v-if="m.role === 'tool'" class="tool-badge">
+          <!-- Agent status: show what tools are running -->
+          <div v-if="m.role === 'agent-status'" class="agent-status">
+            <div v-if="!m.done && m.tools.length > 0" class="status-thinking">
+              <span class="dot"></span> Processing... ({{ m.tools.filter((t:any) => t.status === 'running').length }} tools running, {{ m.tools.filter((t:any) => t.status === 'done').length }} done)
+            </div>
+            <div v-if="m.done" class="status-done">
+              Used tools: {{ m.tools.map((t:any) => t.name).join(' > ') }}
+            </div>
+          </div>
+          <!-- Tool message from DB -->
+          <div v-else-if="m.role === 'tool'" class="tool-badge">
             [{{ m.tool_name }}]
           </div>
-          <div v-else class="msg-bubble">
-            {{ m.content }}
-          </div>
+          <!-- Normal message bubbles -->
+          <div v-else class="msg-bubble">{{ m.content }}</div>
         </div>
       </div>
+
+      <!-- Uploaded files indicator -->
+      <div v-if="uploadedFiles.length > 0" class="uploaded-files">
+        <span v-for="(f, i) in uploadedFiles" :key="i" class="file-tag">
+          {{ f.split('/').pop() || f.split('\\').pop() }}
+          <button @click="uploadedFiles.splice(i, 1)">x</button>
+        </span>
+      </div>
+
       <div class="chat-input">
-        <input type="file" ref="fileInput" @change="handleFileUpload" hidden />
-        <button class="btn-attach" @click="fileInput?.click()">+</button>
+        <input type="file" ref="fileInput" @change="handleFileUpload" hidden accept="image/*,.pdf,.txt" />
+        <button class="btn-attach" @click="fileInput?.click()" :disabled="uploading">
+          {{ uploading ? 'Uploading...' : '+' }}
+        </button>
         <input
           v-model="inputText"
-          placeholder="Type a message... (e.g. 'help me reimburse this invoice')"
+          placeholder="Type a message... (upload an invoice, then ask me to process it)"
           @keydown.enter="send"
         />
         <button class="btn-send" @click="send" :disabled="!inputText.trim()">Send</button>
@@ -181,63 +218,283 @@ function logout() {
 </template>
 
 <style scoped>
-.chat-layout { display: flex; height: 100vh; }
+* { box-sizing: border-box; }
+
+.chat-layout {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* ---- Sidebar ---- */
 .sidebar {
-  width: 260px; background: #1a1a2e; color: #fff;
-  display: flex; flex-direction: column; overflow: hidden;
+  width: 280px;
+  min-width: 280px;
+  background: #1a1a2e;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .sidebar-header {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 16px; border-bottom: 1px solid #2a2a4e;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 16px 12px;
 }
-.sidebar-header h3 { font-size: 15px; }
+.sidebar-header h3 { font-size: 16px; margin: 0; }
 .btn-new {
-  padding: 4px 12px; background: #667eea; color: #fff;
-  border: none; border-radius: 6px; cursor: pointer; font-size: 13px;
+  margin: 0 16px 12px;
+  padding: 10px 16px;
+  background: #667eea;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  width: calc(100% - 32px);
 }
-.session-list { flex: 1; overflow-y: auto; list-style: none; padding: 8px; }
+.btn-new:hover { background: #5a6fd6; }
+
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  list-style: none;
+  padding: 0 8px;
+  margin: 0;
+}
 .session-list li {
-  padding: 10px 12px; border-radius: 8px; cursor: pointer;
-  display: flex; justify-content: space-between; align-items: center;
-  font-size: 14px; margin-bottom: 2px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 14px;
+  margin-bottom: 2px;
 }
 .session-list li:hover { background: #2a2a4e; }
 .session-list li.active { background: #667eea; }
-.btn-del { background: none; border: none; color: #aaa; cursor: pointer; font-size: 12px; }
-.sidebar-footer {
-  padding: 12px 16px; border-top: 1px solid #2a2a4e;
-  display: flex; justify-content: space-between; align-items: center;
-  font-size: 13px;
-}
-.btn-logout { padding: 4px 10px; background: #e74c3c; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
-
-.chat-main { flex: 1; display: flex; flex-direction: column; background: #f5f7fa; }
-.chat-messages { flex: 1; overflow-y: auto; padding: 20px; }
-.empty { text-align: center; color: #999; margin-top: 100px; }
-.msg { margin-bottom: 12px; }
-.msg.user .msg-bubble { background: #667eea; color: #fff; margin-left: auto; }
-.msg.assistant .msg-bubble { background: #fff; color: #1a1a2e; }
-.msg-bubble {
-  max-width: 70%; padding: 10px 16px; border-radius: 12px;
-  font-size: 14px; line-height: 1.5; white-space: pre-wrap;
-  display: inline-block;
-}
-.msg.user { text-align: right; }
-.tool-badge {
-  display: inline-block; padding: 4px 10px; background: #eee;
-  border-radius: 20px; font-size: 12px; color: #666;
-}
-.chat-input {
-  display: flex; padding: 16px; background: #fff; border-top: 1px solid #eee;
-  align-items: center; gap: 10px;
-}
-.chat-input input[type="text"] {
-  flex: 1; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px;
+.btn-del {
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.5);
+  cursor: pointer;
   font-size: 14px;
+  padding: 2px 6px;
 }
-.btn-attach, .btn-send {
-  padding: 8px 16px; background: #667eea; color: #fff; border: none;
-  border-radius: 8px; cursor: pointer; font-size: 14px;
+.btn-del:hover { color: #e74c3c; }
+
+.sidebar-footer {
+  padding: 14px 16px;
+  border-top: 1px solid #2a2a4e;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  gap: 8px;
 }
-.btn-send:disabled { opacity: 0.5; cursor: default; }
+.user-role { color: #888; }
+.btn-logout {
+  padding: 6px 14px;
+  background: #e74c3c;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* ---- Main Chat ---- */
+.chat-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #f5f7fa;
+  min-width: 0;
+}
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px 48px;
+}
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #999;
+}
+.empty-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 3px dashed #ccc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  color: #ccc;
+  margin-bottom: 16px;
+}
+.empty p { font-size: 16px; margin: 0; }
+.empty-hint { font-size: 13px !important; color: #bbb; margin-top: 8px !important; }
+
+/* ---- Messages ---- */
+.msg { margin-bottom: 16px; max-width: 75%; }
+.msg.user { margin-left: auto; }
+.msg.assistant { margin-right: auto; }
+
+.msg-bubble {
+  padding: 12px 18px;
+  border-radius: 16px;
+  font-size: 15px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg.user .msg-bubble {
+  background: #667eea;
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.msg.assistant .msg-bubble {
+  background: #fff;
+  color: #1a1a2e;
+  border-bottom-left-radius: 4px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+
+/* ---- Agent Status ---- */
+.agent-status {
+  margin: 0 auto 16px;
+}
+.status-thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 20px;
+  font-size: 13px;
+  color: #856404;
+}
+.status-thinking .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #ffc107;
+  animation: pulse 1s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.status-done {
+  padding: 8px 16px;
+  background: #d4edda;
+  border: 1px solid #28a745;
+  border-radius: 20px;
+  font-size: 13px;
+  color: #155724;
+  text-align: center;
+}
+
+/* ---- Tool Badge (from DB) ---- */
+.tool-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  background: #e8e8e8;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #888;
+  margin: 0 auto 8px;
+}
+
+/* ---- Uploaded Files ---- */
+.uploaded-files {
+  display: flex;
+  gap: 8px;
+  padding: 8px 48px;
+  background: #fff;
+  border-top: 1px solid #eee;
+  flex-wrap: wrap;
+}
+.file-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: #e8f0fe;
+  border: 1px solid #667eea;
+  border-radius: 20px;
+  font-size: 13px;
+  color: #667eea;
+}
+.file-tag button {
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+}
+
+/* ---- Input ---- */
+.chat-input {
+  display: flex;
+  padding: 16px 48px;
+  background: #fff;
+  border-top: 1px solid #eee;
+  align-items: center;
+  gap: 12px;
+}
+.chat-input > input[type="text"] {
+  flex: 1;
+  padding: 14px 18px;
+  border: 2px solid #e0e0e0;
+  border-radius: 12px;
+  font-size: 15px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.chat-input > input[type="text"]:focus { border-color: #667eea; }
+
+.btn-attach {
+  padding: 12px 18px;
+  background: #e8e8e8;
+  color: #333;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 700;
+  min-width: 48px;
+}
+.btn-attach:hover { background: #ddd; }
+.btn-attach:disabled { opacity: 0.5; }
+
+.btn-send {
+  padding: 12px 28px;
+  background: #667eea;
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+}
+.btn-send:hover { background: #5a6fd6; }
+.btn-send:disabled { opacity: 0.4; cursor: default; }
+
+/* ---- Responsive ---- */
+@media (max-width: 768px) {
+  .sidebar { width: 200px; min-width: 200px; }
+  .chat-messages { padding: 20px 16px; }
+  .chat-input { padding: 12px 16px; }
+  .msg { max-width: 90%; }
+}
 </style>
