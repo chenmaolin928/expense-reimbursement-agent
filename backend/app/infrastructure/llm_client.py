@@ -77,6 +77,7 @@ class _MockChatModel:
             mtype = getattr(m, "type", None)
 
             if mtype == "human":
+                # Use the LAST human message for confirmation detection
                 last_user_msg = content
                 if any(kw in content for kw in ("上传", "发票", "invoice", "attachment", "receipt", "报销", "reimburse")):
                     has_attachment = True
