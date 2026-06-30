@@ -33,7 +33,7 @@ async function uploadDoc(kbId: number, e: Event) {
   uploadingDoc.value = kbId
   const form = new FormData()
   form.append('file', input.files[0])
-  await api.post(`/knowledge/bases/${kbId}/documents`, form, { headers: { 'Content-Type': 'multipart/form-data' } })
+  await api.post(`/knowledge/bases/${kbId}/documents`, form)
   uploadingDoc.value = null; input.value = ''
   await loadKBs()
 }

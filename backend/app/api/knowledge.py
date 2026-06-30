@@ -1,5 +1,6 @@
 """Knowledge base API routes — admin creates/manages, all users can search."""
 
+from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
@@ -15,6 +16,47 @@ from app.schemas.knowledge import (
 )
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
+
+
+def _extract_text(filename: str, content_bytes: bytes) -> str:
+    """Extract text from uploaded file. Supports PDF, Word, and plain text (UTF-8/GBK)."""
+    lower = filename.lower()
+
+    # PDF: extract with PyPDF2
+    if lower.endswith(".pdf"):
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(BytesIO(content_bytes))
+            pages = [page.extract_text() or "" for page in reader.pages]
+            text = "\n".join(pages).strip()
+            if text:
+                return text
+        except Exception:
+            pass  # fall through to text decode
+
+    # Word .docx: extract with python-docx
+    if lower.endswith(".docx"):
+        try:
+            from docx import Document
+            doc = Document(BytesIO(content_bytes))
+            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+            text = "\n".join(paragraphs).strip()
+            if text:
+                return text
+        except Exception:
+            pass  # fall through to text decode
+
+    # Plain text: try UTF-8, then GBK
+    try:
+        return content_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return content_bytes.decode("gbk")
+    except Exception:
+        pass
+
+    raise HTTPException(status_code=400, detail="无法解析文件内容，请上传 UTF-8/GBK 文本文件、PDF 或 Word 文档")
 
 
 # --- Knowledge Bases ---
@@ -79,13 +121,7 @@ def upload_document(
     if not kb:
         raise HTTPException(status_code=404, detail="知识库不存在")
     content_bytes = file.file.read()
-    try:
-        content = content_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        try:
-            content = content_bytes.decode("gbk")
-        except Exception:
-            raise HTTPException(status_code=400, detail="无法解析文件编码，请使用 UTF-8 或 GBK")
+    content = _extract_text(file.filename or "", content_bytes)
     if not content.strip():
         raise HTTPException(status_code=400, detail="文件内容为空")
     doc = svc.add_document(kb_id=kb_id, filename=file.filename or "untitled", content=content)

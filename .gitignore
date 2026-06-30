@@ -1,3 +1,6 @@
+# Docs
+docs/plan.md
+
 # AI 工具本地配置
 .claude/settings.local.json
 .claude/settings.json
@@ -32,3 +35,4 @@ venv/
 
 # Uploaded files
 data/
+.tokensave
