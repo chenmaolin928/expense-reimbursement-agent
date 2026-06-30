@@ -26,6 +26,7 @@ venv/
 
 # Database
 *.db
+*.db-journal
 
 # Uploaded files
 data/
