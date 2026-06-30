@@ -1,5 +1,7 @@
 # AI 工具本地配置
 .claude/settings.local.json
+.claude/settings.json
+.claude/plans/
 .cursor/
 .aider*
 .continue/
