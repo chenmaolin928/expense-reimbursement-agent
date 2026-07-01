@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import api from '../api'
@@ -12,6 +12,18 @@ const kbDesc = ref('')
 const kbs = ref<any[]>([])
 const stats = ref<any>({})
 const uploadingDoc = ref<number | null>(null)
+const expandedKb = ref<number | null>(null)
+const expandedDocs = ref<Set<number>>(new Set())
+const chunkDetails = ref<Map<number, any[]>>(new Map())
+
+const searchQuery = ref('')
+const searchTopK = ref(5)
+const searchThreshold = ref(0)
+const searchKbId = ref<number | null>(null)
+const searchMode = ref<'normal' | 'raw'>('normal')
+const searching = ref(false)
+const searchResults = ref<any[]>([])
+const searchMeta = ref<any>(null)
 
 onMounted(async () => { await loadKBs(); await loadStats() })
 
@@ -36,13 +48,102 @@ async function uploadDoc(kbId: number, e: Event) {
   await api.post(`/knowledge/bases/${kbId}/documents`, form)
   uploadingDoc.value = null; input.value = ''
   await loadKBs()
+  if (expandedKb.value === kbId) await loadDocs(kbId)
 }
+
+async function loadDocs(kbId: number) {
+  const res = await api.get(`/knowledge/bases/${kbId}/documents`)
+  kbs.value = kbs.value.map(kb => kb.id === kbId ? { ...kb, _docs: res.data } : kb)
+}
+
+async function toggleKb(kbId: number) {
+  if (expandedKb.value === kbId) { expandedKb.value = null; return }
+  expandedKb.value = kbId
+  await loadDocs(kbId)
+}
+
+async function toggleDocChunks(docId: number) {
+  if (expandedDocs.value.has(docId)) {
+    expandedDocs.value.delete(docId)
+    return
+  }
+  expandedDocs.value.add(docId)
+  const res = await api.get(`/knowledge/documents/${docId}/chunks`)
+  chunkDetails.value.set(docId, res.data.chunks || [])
+}
+
+async function chromaStats() {
+  const res = await api.get('/knowledge/chroma-stats')
+  alert(JSON.stringify(res.data, null, 2))
+}
+
+async function doSearch() {
+  if (!searchQuery.value.trim()) return
+  searching.value = true
+  try {
+    const params: any = { q: searchQuery.value.trim() }
+    if (searchKbId.value !== null) params.kb_id = searchKbId.value
+    if (searchMode.value === 'raw') {
+      params.top_k = searchTopK.value
+      if (searchThreshold.value > 0) params.threshold = searchThreshold.value
+      const res = await api.get('/knowledge/chroma-search-raw', { params })
+      searchResults.value = res.data.results || []
+      searchMeta.value = {
+        total_results: res.data.total_results,
+        top_k: res.data.top_k,
+        threshold: res.data.threshold,
+        kb_id_filter: res.data.kb_id_filter,
+      }
+    } else {
+      params.top_k = searchTopK.value
+      if (searchThreshold.value > 0) params.threshold = searchThreshold.value
+      const res = await api.get('/knowledge/search', { params })
+      searchResults.value = res.data
+      searchMeta.value = {
+        total_results: res.data.length,
+        top_k: searchTopK.value,
+        threshold: searchThreshold.value,
+        kb_id_filter: searchKbId.value,
+      }
+    }
+  } catch (e: any) {
+    alert('Search failed: ' + (e.response?.data?.detail || e.message))
+    searchResults.value = []
+    searchMeta.value = null
+  } finally {
+    searching.value = false
+  }
+}
+
+function scoreColor(score: number): string {
+  if (score >= 0.8) return '#34d399'
+  if (score >= 0.6) return '#fbbf24'
+  if (score >= 0.4) return '#f97316'
+  return '#f87171'
+}
+
+type SortField = 'score' | 'distance'
+const sortField = ref<SortField>('score')
+const sortDir = ref<-1 | 1>(-1)
+const sortedResults = computed(() => {
+  const arr = [...searchResults.value]
+  arr.sort((a, b) => {
+    const va = sortField.value === 'score' ? (a.score ?? a.cosine_similarity ?? 0) : (a.distance ?? 999)
+    const vb = sortField.value === 'score' ? (b.score ?? b.cosine_similarity ?? 0) : (b.distance ?? 999)
+    return (va - vb) * sortDir.value
+  })
+  return arr
+})
 
 function logout() { auth.logout(); router.push('/login') }
 
 const statusLabels: Record<string, string> = {
   draft: 'Draft', submitted: 'Submitted', manager_approval: 'Manager Review',
   finance_approval: 'Finance Review', approved: 'Approved', paid: 'Paid', rejected: 'Rejected',
+}
+
+function statusClassName(key: string | number): string {
+  return String(key)
 }
 </script>
 
@@ -113,7 +214,7 @@ const statusLabels: Record<string, string> = {
             v-for="(count, key) in stats.by_status"
             :key="key"
             class="status-seg"
-            :class="key"
+            :class="statusClassName(key)"
             :style="{ flex: Math.max(count, 1) }"
             :title="`${statusLabels[key] || key}: ${count}`"
           >
@@ -122,7 +223,7 @@ const statusLabels: Record<string, string> = {
         </div>
         <div class="status-legend">
           <div v-for="(count, key) in stats.by_status" :key="key" class="legend-item" v-show="count > 0">
-            <span class="legend-dot" :class="key" /> {{ statusLabels[key] || key }} ({{ count }})
+            <span class="legend-dot" :class="statusClassName(key)" /> {{ statusLabels[key] || key }} ({{ count }})
           </div>
         </div>
       </section>
@@ -141,26 +242,153 @@ const statusLabels: Record<string, string> = {
 
         <!-- KB List -->
         <section class="panel" style="grid-column: span 2;">
-          <h3>Knowledge Bases</h3>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h3 style="margin:0;">Knowledge Bases</h3>
+            <button class="btn-sm" @click="chromaStats">ChromaDB Stats</button>
+          </div>
           <div v-if="kbs.length === 0" class="panel-empty">No knowledge bases yet. Create one above.</div>
-          <div v-for="kb in kbs" :key="kb.id" class="kb-row">
-            <div class="kb-info">
-              <span class="kb-name">{{ kb.name }}</span>
-              <span class="kb-desc">{{ kb.description }}</span>
+          <div v-for="kb in kbs" :key="kb.id">
+            <div class="kb-row" @click="toggleKb(kb.id)" style="cursor:pointer;">
+              <div class="kb-info">
+                <span class="kb-name">{{ kb.name }}</span>
+                <span class="kb-desc">{{ kb.description }}</span>
+              </div>
+              <div class="kb-meta">
+                <span class="kb-count">{{ kb.document_count }} docs</span>
+              </div>
+              <div class="kb-actions">
+                <label :class="['btn-sm', { loading: uploadingDoc === kb.id }]">
+                  <input type="file" hidden @change="uploadDoc(kb.id, $event)" @click.stop />
+                  {{ uploadingDoc === kb.id ? 'Uploading...' : 'Upload Doc' }}
+                </label>
+                <button class="btn-sm btn-danger" @click.stop="deleteKB(kb.id)">Delete</button>
+              </div>
             </div>
-            <div class="kb-meta">
-              <span class="kb-count">{{ kb.document_count }} docs</span>
-            </div>
-            <div class="kb-actions">
-              <label :class="['btn-sm', { loading: uploadingDoc === kb.id }]">
-                <input type="file" hidden @change="uploadDoc(kb.id, $event)" />
-                {{ uploadingDoc === kb.id ? 'Uploading...' : 'Upload Doc' }}
-              </label>
-              <button class="btn-sm btn-danger" @click="deleteKB(kb.id)">Delete</button>
+            <!-- Expanded: document list with chunks -->
+            <div v-if="expandedKb === kb.id" class="kb-docs">
+              <div v-if="!kb._docs || kb._docs.length === 0" class="panel-empty" style="padding:10px;">No documents yet.</div>
+              <div v-for="doc in (kb._docs || [])" :key="doc.id" class="doc-item">
+                <div class="doc-header" @click="toggleDocChunks(doc.id)">
+                  <span class="doc-name">📄 {{ doc.filename }}</span>
+                  <span class="doc-meta">{{ doc.chunk_count }} chunks · {{ new Date(doc.created_at).toLocaleDateString() }}</span>
+                  <span class="doc-expand">{{ expandedDocs.has(doc.id) ? '▾' : '▸' }}</span>
+                </div>
+                <div v-if="expandedDocs.has(doc.id) && chunkDetails.has(doc.id)" class="doc-chunks">
+                  <div v-for="c in (chunkDetails.get(doc.id) || [])" :key="c.index" class="chunk-item">
+                    <span class="chunk-idx">#{{ c.index }}</span>
+                    <span class="chunk-text">{{ c.text }}</span>
+                    <span class="chunk-len">{{ c.char_count }}c</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </section>
       </div>
+
+      <!-- Search Debug Panel -->
+      <section class="panel" style="margin-top: 24px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px;">
+          <h3 style="margin:0;">🔍 Search Debug</h3>
+          <span style="font-size:11px; color: rgba(255,255,255,0.3);">Test retrieval quality & tune parameters</span>
+        </div>
+
+        <!-- Controls -->
+        <div class="search-controls">
+          <div class="search-row">
+            <input
+              v-model="searchQuery"
+              placeholder="Enter search query..."
+              class="input-dark"
+              style="flex:1;"
+              @keyup.enter="doSearch"
+            />
+            <button @click="doSearch" :disabled="searching" class="btn-primary">
+              {{ searching ? 'Searching...' : 'Search' }}
+            </button>
+          </div>
+          <div class="search-params">
+            <label class="param-label">
+              Top-K
+              <select v-model.number="searchTopK" class="input-dark param-select">
+                <option :value="1">1</option>
+                <option :value="3">3</option>
+                <option :value="5">5</option>
+                <option :value="10">10</option>
+                <option :value="20">20</option>
+                <option :value="50">50</option>
+              </select>
+            </label>
+            <label class="param-label">
+              Threshold
+              <select v-model.number="searchThreshold" class="input-dark param-select">
+                <option :value="0">None</option>
+                <option :value="0.3">0.3</option>
+                <option :value="0.5">0.5</option>
+                <option :value="0.7">0.7</option>
+                <option :value="0.8">0.8</option>
+                <option :value="0.9">0.9</option>
+              </select>
+            </label>
+            <label class="param-label">
+              KB Filter
+              <select v-model.number="searchKbId" class="input-dark param-select">
+                <option :value="null">All</option>
+                <option v-for="kb in kbs" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
+              </select>
+            </label>
+            <label class="param-label">
+              Mode
+              <select v-model="searchMode" class="input-dark param-select">
+                <option value="normal">Normal (SearchResult)</option>
+                <option value="raw">Raw (ChromaDB)</option>
+              </select>
+            </label>
+            <label class="param-label" v-if="searchResults.length > 0">
+              Sort
+              <select v-model="sortField" class="input-dark param-select">
+                <option value="score">Score ↓</option>
+                <option value="distance">Distance ↑</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <!-- Empty -->
+        <div v-if="!searching && searchResults.length === 0 && !searchMeta" class="panel-empty" style="padding: 40px 0;">
+          Enter a query and click Search to test retrieval quality.
+        </div>
+
+        <!-- Meta bar -->
+        <div v-if="searchMeta" class="search-meta-bar">
+          <span>{{ searchMeta.total_results }} results</span>
+          <span>top_k={{ searchMeta.top_k }}</span>
+          <span v-if="searchMeta.threshold">threshold={{ searchMeta.threshold }}</span>
+          <span v-if="searchMeta.kb_id_filter">kb_id={{ searchMeta.kb_id_filter }}</span>
+          <span class="meta-mode">{{ searchMode === 'raw' ? 'raw query' : 'normal' }}</span>
+        </div>
+
+        <!-- Results -->
+        <div class="search-results" v-if="sortedResults.length > 0">
+          <div v-for="(r, idx) in sortedResults" :key="idx" class="search-result-item">
+            <div class="sr-header">
+              <span class="sr-rank">#{{ idx + 1 }}</span>
+              <span class="sr-file">{{ r.filename }}</span>
+              <span v-if="r.kb_name" class="sr-kb">{{ r.kb_name }}</span>
+              <span class="sr-score" :style="{color: scoreColor(r.score ?? r.cosine_similarity ?? 0)}">
+                {{ ((r.score ?? r.cosine_similarity ?? 0) * 100).toFixed(1) }}%
+              </span>
+              <span v-if="r.distance !== undefined" class="sr-distance">d={{ r.distance }}</span>
+            </div>
+            <div class="sr-snippet">{{ r.snippet || r.text }}</div>
+          </div>
+        </div>
+
+        <!-- No results -->
+        <div v-if="!searching && searchMeta && sortedResults.length === 0" class="panel-empty" style="padding: 20px 0;">
+          No results found. Try lowering the threshold or changing the query.
+        </div>
+      </section>
     </div>
   </div>
 </template>
@@ -306,4 +534,98 @@ const statusLabels: Record<string, string> = {
 .btn-sm.loading { opacity: 0.5; }
 .btn-danger { background: rgba(248,113,113,0.1); color: #fca5a5; }
 .btn-danger:hover { background: rgba(248,113,113,0.2); }
+
+/* Document list inside expanded KB */
+.kb-docs {
+  margin-left: 12px; border-left: 1px solid rgba(255,255,255,0.05); padding-left: 16px;
+  margin-bottom: 12px;
+}
+.doc-item { margin-bottom: 6px; }
+.doc-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background 0.15s;
+}
+.doc-header:hover { background: rgba(255,255,255,0.03); }
+.doc-name { font-size: 13px; color: rgba(255,255,255,0.7); flex: 1; }
+.doc-meta { font-size: 11px; color: rgba(255,255,255,0.25); }
+.doc-expand { font-size: 11px; color: rgba(255,255,255,0.3); width: 16px; text-align: center; }
+
+/* Chunk display */
+.doc-chunks {
+  margin-left: 20px; margin-top: 4px;
+  border-left: 1px solid rgba(99,102,241,0.15); padding-left: 12px;
+}
+.chunk-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 0; font-size: 12px;
+}
+.chunk-idx {
+  color: rgba(99,102,241,0.6); font-weight: 600; min-width: 28px; flex-shrink: 0;
+}
+.chunk-text {
+  color: rgba(255,255,255,0.5); flex: 1; word-break: break-all; line-height: 1.4;
+}
+.chunk-len {
+  color: rgba(255,255,255,0.2); font-size: 10px; flex-shrink: 0; min-width: 30px; text-align: right;
+}
+
+/* Search Debug Panel */
+.search-controls {
+  display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px;
+}
+.search-row {
+  display: flex; gap: 10px;
+}
+.search-params {
+  display: flex; gap: 12px; flex-wrap: wrap;
+}
+.param-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: rgba(255,255,255,0.4);
+}
+.param-select {
+  width: auto; padding: 6px 10px; font-size: 12px;
+}
+.search-meta-bar {
+  display: flex; gap: 16px; flex-wrap: wrap;
+  padding: 8px 12px; margin-bottom: 12px;
+  background: rgba(255,255,255,0.02); border-radius: 8px;
+  font-size: 12px; color: rgba(255,255,255,0.3);
+}
+.meta-mode {
+  margin-left: auto; color: rgba(99,102,241,0.6); font-weight: 500;
+}
+.search-results {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.search-result-item {
+  padding: 12px 14px;
+  background: rgba(255,255,255,0.015); border: 1px solid rgba(255,255,255,0.04);
+  border-radius: 10px; transition: background 0.15s;
+}
+.search-result-item:hover { background: rgba(255,255,255,0.03); }
+.sr-header {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+}
+.sr-rank {
+  font-size: 11px; color: rgba(99,102,241,0.5); font-weight: 600; min-width: 24px;
+}
+.sr-file {
+  font-size: 13px; color: #e4e4e7; font-weight: 500; flex: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sr-kb {
+  font-size: 11px; color: rgba(255,255,255,0.25);
+  padding: 2px 8px; background: rgba(255,255,255,0.03); border-radius: 6px;
+}
+.sr-score {
+  font-size: 14px; font-weight: 700; min-width: 52px; text-align: right; font-variant-numeric: tabular-nums;
+}
+.sr-distance {
+  font-size: 11px; color: rgba(255,255,255,0.2); min-width: 64px; text-align: right; font-variant-numeric: tabular-nums;
+}
+.sr-snippet {
+  font-size: 12px; color: rgba(255,255,255,0.5); line-height: 1.5;
+  padding-left: 24px; word-break: break-word;
+}
 </style>

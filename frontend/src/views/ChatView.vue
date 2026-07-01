@@ -46,25 +46,22 @@ async function send() {
   inputText.value = ''
   processing.value = true
 
-  let fullText = text
-  if (uploadedFiles.value.length > 0) {
-    fullText = `[Uploaded: ${uploadedFiles.value.join(', ')}]\n${text}`
-  }
   const attachments = [...uploadedFiles.value]
   uploadedFiles.value = []
 
   streamingMessages.value.push({ role: 'user', content: text })
 
-  const toolTracker: any = { role: 'agent-status', tools: [], done: false, steps: [] }
+  const toolTracker: any = { role: 'agent-status', tools: [], done: false, steps: [], plan: [] }
   streamingMessages.value.push(toolTracker)
 
   try {
-    const res = await chat.sendMessage(chat.currentSessionId, fullText, attachments)
+    const res = await chat.sendMessage(chat.currentSessionId, text, attachments)
     const reader = res.body?.getReader()
     if (!reader) { processing.value = false; return }
 
     const decoder = new TextDecoder()
     let buf = ''
+    let assistantStarted = false
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -74,12 +71,30 @@ async function send() {
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           const evt = JSON.parse(line.slice(6))
-          if (evt.type === 'message' && evt.role === 'assistant') {
-            toolTracker.done = true
-            const last = streamingMessages.value[streamingMessages.value.length - 1]
-            if (last?.role === 'assistant') {
-              last.content += evt.content || ''
+          if (evt.type === 'plan') {
+            // Execution plan from PAO agent
+            toolTracker.plan = evt.steps || []
+          } else if (evt.type === 'thinking') {
+            // Real-time token streaming — show each token as it arrives
+            const token = evt.content || ''
+            if (assistantStarted) {
+              const last = streamingMessages.value[streamingMessages.value.length - 1]
+              if (last?.role === 'assistant') last.content += token
             } else {
+              assistantStarted = true
+              streamingMessages.value.push({ role: 'assistant', content: token })
+            }
+          } else if (evt.type === 'message' && evt.role === 'assistant') {
+            toolTracker.done = true
+            // If we already have a thinking-built assistant bubble, finalize it.
+            // If no streaming happened (single-chunk response), create the bubble.
+            if (assistantStarted) {
+              const last = streamingMessages.value[streamingMessages.value.length - 1]
+              if (last?.role === 'assistant' && last.content !== evt.content) {
+                last.content = evt.content || ''
+              }
+            } else {
+              assistantStarted = true
               streamingMessages.value.push({ role: 'assistant', content: evt.content || '' })
             }
           } else if (evt.type === 'tool_call') {
@@ -90,6 +105,16 @@ async function send() {
             if (t) t.status = 'done'
             const step = toolTracker.steps.find((x: any) => x.name === evt.tool && x.status === 'running')
             if (step) step.status = 'done'
+          } else if (evt.type === 'done') {
+            toolTracker.done = true
+            toolTracker.tools.forEach((t: any) => {
+              if (t.status === 'running') t.status = 'done'
+            })
+            toolTracker.steps.forEach((step: any) => {
+              if (step.status === 'running') step.status = 'done'
+            })
+          } else if (evt.type === 'error') {
+            toolTracker.done = true
           }
         }
       }

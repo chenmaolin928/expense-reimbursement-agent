@@ -22,13 +22,19 @@ class KnowledgeBaseResponse(BaseModel):
         from_attributes = True
 
 
+class ChunkPreview(BaseModel):
+    index: int
+    text: str
+    char_count: int
+
+
 class KnowledgeDocumentResponse(BaseModel):
     id: int
     kb_id: int
     filename: str
     chunk_count: int
     created_at: datetime
-    # Content is NOT returned in lists — only in detail
+    chunks_preview: list[ChunkPreview] = []  # first 5 chunks for verification
 
 
 class KnowledgeDocumentDetail(BaseModel):
@@ -38,11 +44,22 @@ class KnowledgeDocumentDetail(BaseModel):
     content: str
     chunk_count: int
     created_at: datetime
+    chunks_preview: list[ChunkPreview] = []  # all chunks
+
+
+class DocumentChunksResponse(BaseModel):
+    document_id: int
+    filename: str
+    kb_name: str
+    total_chunks: int
+    chunks: list[ChunkPreview]
 
 
 class SearchResult(BaseModel):
+    chunk_id: str
     document_id: int
     filename: str
     kb_name: str
     snippet: str
     score: float = 1.0
+    distance: float | None = None

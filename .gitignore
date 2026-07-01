@@ -9,6 +9,7 @@ docs/plan.md
 .aider*
 .continue/
 .cody/
+.agents
 
 # 密钥和凭证
 *.pem

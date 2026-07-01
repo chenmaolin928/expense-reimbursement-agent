@@ -1,7 +1,13 @@
 """Agent unit tests — verify ReAct loop, tools, mock LLM behavior."""
 
 import pytest
-from app.services.agent_service import build_agent_graph, AGENT_TOOLS, SYSTEM_PROMPT
+from app.services.agent_service import (
+    AGENT_TOOLS,
+    PLAN_PROMPT,
+    SYSTEM_PROMPT,
+    _strip_attachment_markers,
+    build_agent_graph,
+)
 
 
 class TestAgentGraph:
@@ -14,8 +20,11 @@ class TestAgentGraph:
     def test_graph_has_agent_and_tools(self):
         graph = build_agent_graph()
         nodes = list(graph.nodes.keys())
-        assert "agent" in nodes
+        # PAO graph: plan → act ↔ tools → observe
+        assert "plan" in nodes
+        assert "act" in nodes
         assert "tools" in nodes
+        assert "observe" in nodes
 
     def test_tools_registered(self):
         assert len(AGENT_TOOLS) == 5
@@ -29,6 +38,10 @@ class TestAgentGraph:
         assert "search_knowledge" in SYSTEM_PROMPT
         assert "submit_reimbursement" in SYSTEM_PROMPT
         assert "send_notification" in SYSTEM_PROMPT
+
+    def test_plan_prompt_contains_tools(self):
+        assert "scan_invoice" in PLAN_PROMPT
+        assert "search_knowledge" in PLAN_PROMPT
 
 
 class TestMockLLM:
@@ -52,7 +65,7 @@ class TestMockLLM:
 
         model = _MockChatModel()
         model.bind_tools(AGENT_TOOLS)
-        response = model.invoke([HumanMessage(content="帮我报销这张发票 已上传文件: receipt.png")])
+        response = model.invoke([HumanMessage(content="[已上传文件: receipt.png]\n帮我报销这张发票")])
         assert response.tool_calls is not None
         assert any(tc["name"] == "scan_invoice" for tc in response.tool_calls)
 
@@ -82,6 +95,80 @@ class TestMockLLM:
         assert response.tool_calls is not None, "Expected tool_calls, got None"
         assert any(tc["name"] == "submit_reimbursement" for tc in response.tool_calls), \
             f"No submit_reimbursement in {[tc['name'] for tc in response.tool_calls]}"
+
+    def test_plan_with_attachment_does_not_include_submit_or_notify(self):
+        from app.infrastructure.llm_client import _MockChatModel
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        model = _MockChatModel()
+        response = model.invoke([
+            SystemMessage(content=PLAN_PROMPT),
+            HumanMessage(content="[已上传文件: receipt.png]\n帮我报销"),
+        ])
+
+        assert "scan_invoice" in response.content
+        assert "search_knowledge" in response.content
+        assert "submit_reimbursement" not in response.content
+        assert "send_notification" not in response.content
+
+    def test_old_attachment_history_does_not_trigger_scan_again(self):
+        from app.infrastructure.llm_client import _MockChatModel
+        from langchain_core.messages import HumanMessage
+
+        model = _MockChatModel()
+        model.bind_tools(AGENT_TOOLS)
+        response = model.invoke([
+            HumanMessage(content="[已上传文件: receipt.png]\n帮我报销"),
+            HumanMessage(content="报销"),
+        ])
+
+        assert not response.tool_calls
+        assert "上传发票" in response.content
+
+    def test_baoxiao_is_not_treated_as_confirmation(self):
+        from app.infrastructure.llm_client import _MockChatModel
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        model = _MockChatModel()
+        model.bind_tools(AGENT_TOOLS)
+        response = model.invoke([
+            HumanMessage(content="[已上传文件: test.png]\n帮我报销"),
+            AIMessage(
+                content="scanning...",
+                tool_calls=[{"name": "scan_invoice", "args": {"file_path": "test.png"}, "id": "1"}],
+            ),
+            ToolMessage(content='{"vendor":"Test","amount":234.5}', name="scan_invoice", tool_call_id="1"),
+            AIMessage(
+                content="checking policy...",
+                tool_calls=[{"name": "search_knowledge", "args": {"query": "test"}, "id": "2"}],
+            ),
+            ToolMessage(content='{"total_results":1}', name="search_knowledge", tool_call_id="2"),
+            HumanMessage(content="报销"),
+        ])
+
+        assert not response.tool_calls
+        assert "是否确认提交报销" in response.content
+
+
+class TestRuntimeLLMConfig:
+    def test_get_model_raises_when_api_key_missing(self, monkeypatch):
+        import app.infrastructure.llm_client as llm_client
+
+        monkeypatch.setattr(llm_client.settings.deepseek, "api_key", "")
+        monkeypatch.setattr(llm_client, "_model", None)
+
+        with pytest.raises(RuntimeError, match="DeepSeek API 未配置"):
+            llm_client.get_model()
+
+
+class TestAgentMessageSanitizing:
+    def test_strip_attachment_markers_only_from_history_prefix(self):
+        original = "[Uploaded: a.png, b.png]\n帮我报销这一张"
+        assert _strip_attachment_markers(original) == "帮我报销这一张"
+
+    def test_strip_attachment_markers_leaves_normal_text(self):
+        original = "我之前上传过发票，这次先问下标准"
+        assert _strip_attachment_markers(original) == original
 
 
 class TestTools:

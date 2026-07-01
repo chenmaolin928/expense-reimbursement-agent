@@ -51,7 +51,7 @@ class DesensitizationService:
 
         batch_id = _generate_batch_id()
         tokens = {}
-        expires_at = datetime.utcnow() + timedelta(days=settings.pii_mapping_retention_days)
+        expires_at = datetime.utcnow() + timedelta(days=settings.pii.mapping_retention_days)
 
         for entity_type, attr_name in PII_FIELDS:
             real_value = str(getattr(emp, attr_name, ""))

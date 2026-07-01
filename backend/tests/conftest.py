@@ -21,8 +21,27 @@ def clean_db():
 
 
 @pytest.fixture
-def client():
-    """FastAPI test client."""
+def client(monkeypatch):
+    """FastAPI test client with an explicit test-only mock LLM.
+
+    Runtime code no longer auto-falls back to mock mode, so tests inject a
+    deterministic fake model explicitly to avoid network dependence.
+    """
+    from app.infrastructure.llm_client import _MockChatModel
+    from app.services.session_agent import SessionAgentManager
+    import app.infrastructure.llm_client as llm_client
+    import app.services.agent_service as agent_service
+    import app.services.session_agent as session_agent
+
+    def build_test_model():
+        return _MockChatModel()
+
+    monkeypatch.setattr(llm_client, "_model", None)
+    monkeypatch.setattr(llm_client, "get_model", build_test_model)
+    monkeypatch.setattr(agent_service, "get_model", build_test_model)
+    monkeypatch.setattr(session_agent, "get_model", build_test_model)
+    SessionAgentManager._instances.clear()
+
     return TestClient(app)
 
 

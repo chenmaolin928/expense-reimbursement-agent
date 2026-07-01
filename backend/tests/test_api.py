@@ -131,6 +131,23 @@ class TestChatAPI:
         body = resp.text
         # Should contain scan_invoice tool call
         assert "scan_invoice" in body
+        assert '"type": "done"' in body
+
+    def test_chat_policy_query_uses_tool_and_returns_final_answer(self, client, employee_token):
+        headers = {"Authorization": f"Bearer {employee_token}"}
+        r = client.post("/api/v1/chat/sessions", json={"title": "Policy"}, headers=headers)
+        sid = r.json()["id"]
+
+        resp = client.post("/api/v1/chat", json={
+            "session_id": sid,
+            "message": "What meal expenses can be reimbursed?",
+        }, headers=headers)
+        assert resp.status_code == 200
+        body = resp.text
+        assert "search_knowledge" in body
+        assert '"type": "message"' in body
+        assert "[{\"step\"" not in body
+        assert '"type": "done"' in body
 
     def test_delete_session(self, client, employee_token):
         headers = {"Authorization": f"Bearer {employee_token}"}

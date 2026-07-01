@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase
 from app.config import settings
 
 engine = create_engine(
-    settings.database_url,
+    settings.db.url,
     connect_args={"check_same_thread": False},  # SQLite requires this
     echo=False,  # SQL logging — set True to debug queries
 )

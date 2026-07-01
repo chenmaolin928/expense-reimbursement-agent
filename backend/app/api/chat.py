@@ -95,7 +95,9 @@ def delete_session(
     s = svc.get(session_id)
     if not s or s.user_id != auth["user_id"]:
         raise HTTPException(status_code=404, detail="会话不存在")
-    svc.delete(session_id)
+    # Also remove session agent on session deletion
+    from app.services.session_agent import SessionAgentManager
+    SessionAgentManager.remove(session_id)
 
 
 # ============================================================
@@ -115,8 +117,8 @@ def upload_file(
         raise HTTPException(status_code=404, detail="会话不存在")
 
     # Save file
-    os.makedirs(settings.invoice_storage_path, exist_ok=True)
-    file_path = os.path.join(settings.invoice_storage_path, f"{session_id}_{file.filename}")
+    os.makedirs(settings.storage.invoice_storage_path, exist_ok=True)
+    file_path = os.path.join(settings.storage.invoice_storage_path, f"{session_id}_{file.filename}")
     with open(file_path, "wb") as f:
         f.write(file.file.read())
 
@@ -170,6 +172,15 @@ async def chat(
 
     async def event_stream():
         try:
+            # Clean up idle sessions periodically (1/10 chance)
+            import random
+            if random.random() < 0.1:
+                from app.services.session_agent import SessionAgentManager
+                removed = SessionAgentManager.cleanup()
+                if removed:
+                    import logging
+                    logging.getLogger(__name__).info(f"Cleaned up {removed} idle session agents")
+
             events = await run_agent(
                 session_id=req.session_id,
                 user_message=full_message,

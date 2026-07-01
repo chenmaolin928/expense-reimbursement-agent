@@ -15,7 +15,7 @@ from app.api.router import api_router
 async def lifespan(app: FastAPI):
     """Create tables on startup."""
     # Ensure data directories exist
-    os.makedirs(settings.invoice_storage_path, exist_ok=True)
+    os.makedirs(settings.storage.invoice_storage_path, exist_ok=True)
     # Create all tables
     Base.metadata.create_all(bind=engine)
     yield
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "app.main:app",
-        host=settings.app_host,
-        port=settings.app_port,
-        reload=settings.app_env == "development",
+        host=settings.app.host,
+        port=settings.app.port,
+        reload=settings.app.env == "development",
     )

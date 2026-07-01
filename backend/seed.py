@@ -17,7 +17,7 @@ def _hash_password(password: str) -> str:
 
 
 # Ensure data dir exists
-os.makedirs(settings.invoice_storage_path, exist_ok=True)
+os.makedirs(settings.storage.invoice_storage_path, exist_ok=True)
 
 # Create tables
 Base.metadata.create_all(bind=engine)
