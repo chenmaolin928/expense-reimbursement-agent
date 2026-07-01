@@ -9,6 +9,25 @@ Architecture:
 import re
 from abc import ABC, abstractmethod
 
+from app.services.enterprise_data_sanitizer import EnterpriseDataSanitizer
+
+
+# Shared sanitizer for defense-in-depth stripping of PII from raw_text
+# The primary enforcement is the LLM Security Gateway — this is a belt-and-suspenders fallback.
+_text_sanitizer = EnterpriseDataSanitizer({})
+
+
+def _sanitize_raw_text(text: str) -> str:
+    """纵深防御：去除 raw_text 中的 PII。主力执行点是 LLMSecurityGateway。"""
+    if not text:
+        return text
+    # Strip common PII patterns
+    text = re.sub(r'\d{15,20}', '[TAX_ID_REDACTED]', text)  # tax ID / USCC
+    text = re.sub(r'\d{17}[\dXx]', '[ID_REDACTED]', text)   # national ID
+    text = re.sub(r'1[3-9]\d{9}', '[PHONE_REDACTED]', text) # phone
+    text = re.sub(r'\d{16,19}', '[BANK_REDACTED]', text)     # bank account (after other digit patterns)
+    return text
+
 
 class IOCRService(ABC):
     """Interface for OCR services."""

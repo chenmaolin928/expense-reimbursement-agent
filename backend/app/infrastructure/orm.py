@@ -78,6 +78,8 @@ class ChatMessage(Base):
     tool_result = Column(JSON, nullable=True)       # tool execution result
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    attachments = Column(JSON, nullable=True)  # 该条消息上传的附件路径列表
+
     session = relationship("ChatSession", back_populates="messages")
 
 

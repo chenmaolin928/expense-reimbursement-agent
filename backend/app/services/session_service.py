@@ -41,6 +41,7 @@ class SessionService:
         content: str | None = None,
         tool_name: str | None = None,
         tool_result: dict | None = None,
+        attachments: list[str] | None = None,
     ) -> ChatMessage:
         msg = ChatMessage(
             session_id=session_id,
@@ -48,6 +49,7 @@ class SessionService:
             content=content,
             tool_name=tool_name,
             tool_result=tool_result,
+            attachments=attachments,
         )
         self.db.add(msg)
         # Touch session updated_at

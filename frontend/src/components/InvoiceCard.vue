@@ -18,6 +18,20 @@ const props = defineProps<{
 
 const showDetail = ref(false)
 
+function getFileUrl(filePath: string): string {
+  const name = filePath.split('/').pop() || filePath.split('\\').pop() || filePath
+  return `/api/v1/files/${name}`
+}
+
+function isImagePath(filePath: string): boolean {
+  const ext = (filePath.split('.').pop() || '').toLowerCase()
+  return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext)
+}
+
+function openImage(url: string) {
+  window.open(url, '_blank')
+}
+
 interface FieldEntry { key: string; label: string; value: string | number }
 
 const invoiceFields = computed<FieldEntry[]>(() => {
@@ -57,9 +71,17 @@ function handleCorrect() {
         </svg>
         <span class="header-title">发票扫描结果</span>
       </div>
-      <button class="detail-toggle" @click="showDetail = !showDetail">
-        {{ showDetail ? '收起' : '查看详情' }}
-      </button>
+      <div class="header-right">
+        <img
+          v-if="data.invoice_path && isImagePath(data.invoice_path)"
+          :src="getFileUrl(data.invoice_path)"
+          class="invoice-thumb"
+          @click="openImage(getFileUrl(data.invoice_path))"
+        />
+        <button class="detail-toggle" @click="showDetail = !showDetail">
+          {{ showDetail ? '收起' : '查看详情' }}
+        </button>
+      </div>
     </div>
 
     <!-- Field Table -->
@@ -130,8 +152,18 @@ function handleCorrect() {
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 .header-left { display: flex; align-items: center; gap: 10px; }
+.header-right { display: flex; align-items: center; gap: 8px; }
 .header-icon { width: 20px; height: 20px; color: #818cf8; flex-shrink: 0; }
 .header-title { font-size: 14px; font-weight: 600; color: #e4e4e7; }
+.invoice-thumb {
+  width: 48px; height: 34px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.12);
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+.invoice-thumb:hover { transform: scale(1.1); }
 .detail-toggle {
   background: none; border: none; color: #818cf8; font-size: 12px;
   cursor: pointer; padding: 4px 8px; border-radius: 6px;

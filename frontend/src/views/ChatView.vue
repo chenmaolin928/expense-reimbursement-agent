@@ -6,6 +6,7 @@ import { useChatStore } from '../stores/chat'
 import InvoiceCard from '../components/InvoiceCard.vue'
 import PolicyCard from '../components/PolicyCard.vue'
 import CorrectionForm from '../components/CorrectionForm.vue'
+import SupplementForm from '../components/SupplementForm.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -41,7 +42,10 @@ async function selectSession(sid: string) {
   uploadedFiles.value = []
   await chat.fetchMessages(sid)
   chat.messages.forEach((m) => {
-    streamingMessages.value.push({ role: m.role, content: m.content, tool_name: m.tool_name })
+    streamingMessages.value.push({
+      role: m.role, content: m.content, tool_name: m.tool_name,
+      attachments: m.attachments,
+    })
   })
   scrollDown()
 }
@@ -55,7 +59,7 @@ async function send() {
   const attachments = [...uploadedFiles.value]
   uploadedFiles.value = []
 
-  streamingMessages.value.push({ role: 'user', content: text })
+  streamingMessages.value.push({ role: 'user', content: text, attachments })
 
   const toolTracker: any = { role: 'agent-status', tools: [], done: false, steps: [], plan: [] }
   streamingMessages.value.push(toolTracker)
@@ -147,6 +151,13 @@ async function send() {
             })
           } else if (evt.type === 'confirmation_request') {
             // Agent requests user confirmation — already handled by card buttons
+          } else if (evt.type === 'supplement_form') {
+            // Agent detected incomplete invoice data → show supplement form
+            streamingMessages.value.push({
+              role: 'supplement_form',
+              data: evt.data,
+              timestamp: Date.now(),
+            })
           } else if (evt.type === 'error') {
             toolTracker.done = true
           }
@@ -182,7 +193,7 @@ function scrollDown() {
 
 // ---- Card event handlers ----
 
-function handleInvoiceConfirm(data: any) {
+function handleInvoiceConfirm(_data: any) {
   // User confirmed invoice data → send confirmation message to agent
   const msg = '确认发票信息无误，请继续查询报销政策'
   streamingMessages.value.push({ role: 'user', content: msg })
@@ -331,7 +342,44 @@ async function sendFollowUp(message: string) {
   scrollDown()
 }
 
+// ---- Supplement form handlers ----
+
+function handleSupplementSubmit(fields: Record<string, string | number>) {
+  if (!chat.currentSessionId || processing.value) return
+  showingCorrection.value = false
+
+  const changesStr = Object.entries(fields)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join(', ')
+  streamingMessages.value.push({
+    role: 'user',
+    content: `补充信息：${changesStr}`,
+  })
+  sendFollowUp(`补充信息：${changesStr}`)
+}
+
+function handleSupplementCancel() {
+  // Remove the supplement form message
+  const idx = streamingMessages.value.findIndex((m: any) => m.role === 'supplement_form')
+  if (idx >= 0) streamingMessages.value.splice(idx, 1)
+}
+
 function logout() { auth.logout(); router.push('/login') }
+
+function getAttachmentUrl(filePath: string): string {
+  // Extract filename from absolute path and build /api/v1/files/{filename}
+  const name = filePath.split('/').pop() || filePath.split('\\').pop() || filePath
+  return `/api/v1/files/${name}`
+}
+
+function isImageFile(filePath: string): boolean {
+  const ext = (filePath.split('.').pop() || '').toLowerCase()
+  return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext)
+}
+
+function openAttachment(url: string) {
+  window.open(url, '_blank')
+}
 </script>
 
 <template>
@@ -432,6 +480,20 @@ function logout() { auth.logout(); router.push('/login') }
 
           <!-- User Bubble -->
           <div v-else-if="m.role === 'user'" class="msg-bubble user">
+            <div v-if="m.attachments && m.attachments.length > 0" class="bubble-attachments">
+              <div v-for="(att, ai) in m.attachments" :key="ai" class="bubble-attach-item">
+                <img
+                  v-if="isImageFile(att)"
+                  :src="getAttachmentUrl(att)"
+                  class="bubble-thumb"
+                  @click="openAttachment(getAttachmentUrl(att))"
+                />
+                <a v-else :href="getAttachmentUrl(att)" target="_blank" class="bubble-file-link">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="file-icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                  {{ (att.split('/').pop() || att.split('\\').pop() || att) }}
+                </a>
+              </div>
+            </div>
             <div class="bubble-content">{{ m.content }}</div>
           </div>
 
@@ -485,6 +547,15 @@ function logout() { auth.logout(); router.push('/login') }
               :invoice-path="m.data.invoice_path"
               @submit="handleCorrectionSubmit"
               @cancel="handleCorrectionCancel"
+            />
+          </div>
+
+          <!-- Supplement Form -->
+          <div v-else-if="m.role === 'supplement_form'" class="msg-card-row">
+            <SupplementForm
+              :data="m.data"
+              @submit="handleSupplementSubmit"
+              @cancel="handleSupplementCancel"
             />
           </div>
         </div>
@@ -802,4 +873,39 @@ function logout() { auth.logout(); router.push('/login') }
   border-top-color: #fff; border-radius: 50%; animation: spin 0.6s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Bubble attachments (image thumbnails) */
+.bubble-attachments {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 8px;
+}
+.bubble-attach-item {
+  position: relative;
+}
+.bubble-thumb {
+  width: 80px; height: 56px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 2px solid rgba(255,255,255,0.2);
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.15s;
+}
+.bubble-thumb:hover {
+  transform: scale(1.05);
+  border-color: rgba(255,255,255,0.5);
+}
+.bubble-file-link {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #a5b4fc;
+  text-decoration: none;
+  transition: background 0.15s;
+}
+.bubble-file-link:hover { background: rgba(255,255,255,0.15); }
+.bubble-file-link .file-icon {
+  width: 14px; height: 14px; flex-shrink: 0;
+}
 </style>

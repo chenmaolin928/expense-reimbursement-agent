@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router
 from app.config import settings
@@ -42,6 +43,9 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api/v1")
+
+# Mount invoice files for direct URL access (thumbnail preview)
+app.mount("/api/v1/files", StaticFiles(directory=str(settings.storage.invoice_storage_path)), name="files")
 
 
 @app.get("/")

@@ -79,7 +79,8 @@ def get_session(
             ChatMessageResponse(
                 id=m.id, session_id=m.session_id, role=m.role,
                 content=m.content, tool_name=m.tool_name,
-                tool_result=m.tool_result, created_at=m.created_at,
+                tool_result=m.tool_result, attachments=m.attachments,
+                created_at=m.created_at,
             )
             for m in messages
         ],
@@ -129,6 +130,7 @@ def upload_file(
         "file_path": file_path,
         "filename": safe_name,
         "original_filename": file.filename,
+        "url": f"/api/v1/files/{safe_name}",
     }
 
 
@@ -236,17 +238,28 @@ async def chat(
             email = employee.email
 
     # Save user message
-    user_msg = svc.add_message(session_id=req.session_id, role="user", content=req.message)
+    user_msg = svc.add_message(
+        session_id=req.session_id, role="user", content=req.message,
+        attachments=req.attachments if req.attachments else None,
+    )
+
+    # ---- LLM Security Gateway ----
+    from app.services.llm_security_gateway import LLMSecurityGateway
+    gateway = LLMSecurityGateway(db, req.session_id)
+
+    # 用户消息：原文存 DB 供前端展示，清洗版送 LLM
+    clean_message = gateway.build_user_message(req.message)
+    gateway.audit_log("user_message", {"raw_len": len(req.message), "clean_len": len(clean_message)})
 
     # Build message history from DB
     history = []
     for m in svc.get_messages(req.session_id)[:-1]:  # exclude the one we just saved
         history.append({"role": m.role, "content": m.content})
 
-    # If attachments provided, prepend to message
-    full_message = req.message
+    # Build full message with attachment markers
+    full_message = clean_message
     if req.attachments:
-        full_message = f"[已上传文件: {', '.join(req.attachments)}]\n{req.message}"
+        full_message = f"[已上传文件: {', '.join(req.attachments)}]\n{clean_message}"
 
     async def event_stream():
         try:
@@ -266,6 +279,7 @@ async def chat(
                 employee_id=emp_id,
                 user_email=email,
                 message_history=history,
+                security_gateway=gateway,
             )
 
             assistant_content = ""

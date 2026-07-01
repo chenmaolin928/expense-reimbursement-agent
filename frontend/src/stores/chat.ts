@@ -15,6 +15,7 @@ export interface ChatMessage {
   role: string
   content: string | null
   tool_name: string | null
+  attachments: string[] | null
   created_at: string
 }
 

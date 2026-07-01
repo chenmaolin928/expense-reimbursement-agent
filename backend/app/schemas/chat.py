@@ -17,6 +17,7 @@ class ChatMessageResponse(BaseModel):
     content: str | None = None
     tool_name: str | None = None
     tool_result: dict | None = None
+    attachments: list[str] | None = None
     created_at: datetime
 
     class Config:

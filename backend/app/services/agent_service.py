@@ -355,12 +355,15 @@ async def run_agent(
     employee_id: int | None,
     user_email: str | None,
     message_history: list[dict] | None = None,
+    security_gateway: object | None = None,
 ) -> list[dict]:
     """Run the PAO agent and return SSE events.
 
-    Events: plan, thinking, tool_call, tool_result, plan_step_update, message, done
+    Events: plan, thinking, tool_call, tool_result, plan_step_update, message,
+            done, supplement_form
     """
-    set_tool_context(user_id=user_id, employee_id=employee_id, user_email=user_email)
+    set_tool_context(user_id=user_id, employee_id=employee_id, user_email=user_email,
+                     security_gateway=security_gateway)
 
     agent = get_agent()
     input_messages: list = []
@@ -479,10 +482,19 @@ async def run_agent(
             result = _parse_tool_result(raw)
             tool_name = event["name"]
             has_error = isinstance(result, dict) and "error" in result
+
+            # ---- Gateway: 过滤 Tool 结果（仅白名单字段进 LLM） ----
+            gateway_result = result
+            if security_gateway and isinstance(result, dict) and not has_error:
+                try:
+                    gateway_result = security_gateway.build_tool_result(tool_name, result)
+                except Exception:
+                    pass  # 过滤失败不阻塞流程
+
             events.append({
                 "type": "tool_result",
                 "tool": tool_name,
-                "result": result,
+                "result": gateway_result,  # 清洗版发给前端
             })
             events.append({
                 "type": "plan_step_update",
@@ -493,9 +505,42 @@ async def run_agent(
             # Emit invoice_card after scan_invoice completes (data display only)
             if tool_name == "scan_invoice" and not has_error and isinstance(result, dict):
                 last_invoice_result = result
-                desensitization = _build_desensitization(employee_id, user_id)
-                card = build_invoice_card(result, desensitization)
+                # invoice_card 用完整数据显示给用户（纯前端展示），但 LLM 只收到 gateway 版本
+                card = build_invoice_card(result, {})   # 不再需要 desensitization
                 events.append(card)
+
+                # ---- Supplement form 检测 ----
+                # scan_invoice 结果不完整时，检测是否需要补充信息
+                if security_gateway and (not result.get('vendor') or result.get('vendor') == '未知商户'
+                                         or not result.get('amount') or result.get('category_raw') == 'other'):
+                    missing = []
+                    if not result.get('vendor') or result.get('vendor') == '未知商户':
+                        missing.append({'field': 'vendor', 'label': '商家/供应商', 'type': 'text', 'required': True})
+                    if not result.get('amount'):
+                        missing.append({'field': 'amount', 'label': '发票金额', 'type': 'number', 'required': True})
+                    if result.get('category_raw') == 'other':
+                        missing.append({
+                            'field': 'category', 'label': '费用类别',
+                            'type': 'select',
+                            'required': True,
+                            'options': [
+                                {'value': 'meals', 'label': '餐饮'},
+                                {'value': 'travel', 'label': '差旅'},
+                                {'value': 'transportation', 'label': '交通'},
+                                {'value': 'office_supplies', 'label': '办公用品'},
+                                {'value': 'entertainment', 'label': '商务招待'},
+                            ],
+                        })
+                    if missing:
+                        events.append({
+                            'type': 'supplement_form',
+                            'data': {
+                                'title': '请补充发票信息',
+                                'fields': missing,
+                                'hint': '此信息仅在本地处理，不会发送至云端',
+                                'invoice_path': result.get('file_path', ''),
+                            },
+                        })
 
             # Record search_knowledge result — card/refs dispatch happens
             # AFTER the LLM has produced its natural-language summary
