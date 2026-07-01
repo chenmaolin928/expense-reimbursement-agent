@@ -66,9 +66,17 @@ export const useChatStore = defineStore('chat', () => {
     sessions.value = sessions.value.filter((s) => s.id !== sessionId)
   }
 
+  async function correctSearch(sessionId: string, invoicePath: string, correctedFields: Record<string, string | number>) {
+    const res = await api.post(`/chat/sessions/${sessionId}/correct-search`, {
+      invoice_path: invoicePath,
+      corrected_fields: correctedFields,
+    })
+    return res.data
+  }
+
   return {
     sessions, currentSessionId, messages, loading,
     fetchSessions, createSession, fetchMessages, sendMessage,
-    uploadFile, deleteSession,
+    uploadFile, deleteSession, correctSearch,
   }
 })

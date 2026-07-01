@@ -2,6 +2,7 @@
 
 import json
 import os
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.api.deps import _parse_auth_header
 from app.schemas.chat import (
-    ChatRequest, ChatMessageResponse,
+    ChatRequest, ChatMessageResponse, CorrectSearchRequest,
     SessionCreate, SessionResponse, SessionDetail,
 )
 from app.services.session_service import get_session_service
@@ -116,13 +117,90 @@ def upload_file(
     if not s or s.user_id != auth["user_id"]:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    # Save file
+    # Save file with UUID-based name to avoid encoding issues with Chinese filenames
     os.makedirs(settings.storage.invoice_storage_path, exist_ok=True)
-    file_path = os.path.join(settings.storage.invoice_storage_path, f"{session_id}_{file.filename}")
+    safe_ext = os.path.splitext(file.filename)[1]
+    safe_name = f"{session_id}_{uuid.uuid4().hex[:8]}{safe_ext}"
+    file_path = os.path.join(settings.storage.invoice_storage_path, safe_name)
     with open(file_path, "wb") as f:
         f.write(file.file.read())
 
-    return {"file_path": file_path, "filename": file.filename}
+    return {
+        "file_path": file_path,
+        "filename": safe_name,
+        "original_filename": file.filename,
+    }
+
+
+# ============================================================
+# Correct & Re-search — user fixes OCR fields, re-runs policy search only
+# ============================================================
+
+@router.post("/sessions/{session_id}/correct-search")
+def correct_search(
+    session_id: str,
+    req: CorrectSearchRequest,
+    db: Session = Depends(get_db),
+    auth: dict = Depends(_parse_auth_header),
+):
+    """User corrected invoice fields → re-run knowledge search without re-OCR."""
+    svc = get_session_service(db)
+    s = svc.get(session_id)
+    if not s or s.user_id != auth["user_id"]:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    # Build corrected invoice context
+    corrected = dict(req.corrected_fields)
+
+    # Save user correction message
+    svc.add_message(
+        session_id=session_id,
+        role="user",
+        content=f"[修正信息] {json.dumps(corrected, ensure_ascii=False)}",
+    )
+
+    # Re-run knowledge search with corrected fields
+    from app.services.knowledge_service import KnowledgeService
+    from app.services.policy_card_service import build_policy_card, build_policy_card_out_of_scope
+    from app.services.agent_service import _synthesize_policy_judgment
+
+    # Build search query from corrected fields
+    query_parts = []
+    if "category" in corrected:
+        query_parts.append(str(corrected["category"]))
+    if "vendor" in corrected:
+        query_parts.append(str(corrected["vendor"]))
+    query = " ".join(query_parts) if query_parts else "报销标准"
+
+    ks = KnowledgeService(db)
+    raw_results = ks.search(query)
+    search_results = {
+        "total_results": len(raw_results),
+        "results": [
+            {
+                "chunk_id": r["chunk_id"],
+                "snippet": r["snippet"],
+                "kb_name": r["kb_name"],
+                "filename": r["filename"],
+                "score": r["score"],
+            }
+            for r in raw_results[:5]
+        ],
+    }
+
+    # Build invoice-like result from corrected fields for judgment
+    invoice_result = {
+        "vendor": corrected.get("vendor", ""),
+        "amount": corrected.get("amount", 0),
+        "date": corrected.get("date", ""),
+        "category_raw": corrected.get("category", "other"),
+        "file_path": req.invoice_path,
+    }
+
+    judgment = _synthesize_policy_judgment(invoice_result, search_results)
+    card = build_policy_card(search_results, judgment)
+
+    return card["data"]
 
 
 # ============================================================

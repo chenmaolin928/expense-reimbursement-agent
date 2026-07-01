@@ -1,6 +1,7 @@
 """Knowledge base API routes — admin creates/manages, all users can search."""
 
 from io import BytesIO
+import unicodedata
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
@@ -19,6 +20,28 @@ from app.schemas.knowledge import (
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
+# --- Supported file types ---
+
+# Mapping: extension → extraction strategy
+# - "ocr":  OCR-based extraction (rendered page images → EasyOCR)
+_SUPPORTED_EXTENSIONS: dict[str, list[str]] = {
+    ".txt":  ["text"],
+    ".docx": ["text"],
+    ".pdf":  ["ocr"],  # OCR only — text layer extraction causes CJK mojibake
+}
+
+
+def _get_extraction_strategies(filename: str) -> list[str]:
+    """Return the ordered list of extraction strategies based on file extension."""
+    lower = filename.lower()
+    for ext, strategies in _SUPPORTED_EXTENSIONS.items():
+        if lower.endswith(ext):
+            return strategies
+    raise HTTPException(
+        status_code=400,
+        detail=f"不支持的文件类型: {filename}。支持的类型: .txt, .docx, .pdf",
+    )
+
 
 def _is_garbled(text: str) -> bool:
     """Heuristic: text is likely garbled if it has high-byte chars but no CJK characters.
@@ -29,57 +52,68 @@ def _is_garbled(text: str) -> bool:
     Legitimate Western text with accented characters (é, ñ, ü) has only a few high-bytes
     — we require either >5 high-byte chars OR >30% high-byte density to avoid false positives.
     """
-    if not text.strip():
+    stripped = text.strip()
+    if not stripped:
         return True
-    total = len(text)
-    high_byte = sum(1 for c in text if ord(c) > 127)
-    cjk = sum(1 for c in text if '一' <= c <= '鿿')
-    if cjk > 0:
+
+    visible_chars = [c for c in stripped if not c.isspace()]
+    if not visible_chars:
+        return True
+
+    total = len(visible_chars)
+    high_byte = sum(1 for c in visible_chars if ord(c) > 127)
+    cjk = sum(1 for c in visible_chars if "一" <= c <= "鿿")
+    control_chars = sum(
+        1
+        for c in visible_chars
+        if unicodedata.category(c).startswith("C") and c not in "\n\r\t\f"
+    )
+    replacement_chars = stripped.count("\ufffd")
+
+    # PDF mojibake often contains null bytes or other control characters mixed with ASCII.
+    if control_chars > 0 or replacement_chars > 0:
+        return True
+
+    # A single accidental CJK codepoint inside symbol soup should not whitelist the whole text.
+    cjk_ratio = cjk / total
+    if cjk_ratio >= 0.2:
         return False
+
+    if cjk > 0:
+        return high_byte > 5 or (high_byte > 0 and high_byte / total > 0.3)
+
     # No CJK at all but significant high-byte density → garbled
     return high_byte > 5 or (high_byte > 0 and high_byte / max(total, 1) > 0.3)
 
 
 def _extract_text(filename: str, content_bytes: bytes) -> str:
-    """Extract text from uploaded file. Supports PDF, Word, and plain text (auto-detect encoding).
+    """Extract text from uploaded file based on its extension.
 
-    PDF extraction: tries pdfplumber first (proper Chinese CMap support),
-    falls back to PyPDF2 for simple PDFs.
+    Dispatch logic (declared in _SUPPORTED_EXTENSIONS):
+      .txt  → text (chardet encoding detection)
+      .docx → text (python-docx)
+      .pdf  → ocr (PyMuPDF page rendering → EasyOCR)
     """
+    strategies = _get_extraction_strategies(filename)
+
+    for strategy in strategies:
+        if strategy == "text":
+            result = _extract_text_layer(filename, content_bytes)
+        elif strategy == "ocr":
+            result = _ocr_extract(filename, content_bytes)
+        else:
+            continue
+
+        if result and not _is_garbled(result):
+            return result
+
+    # All strategies exhausted
+    raise HTTPException(status_code=400, detail="无法从文件中提取文本内容")
+
+
+def _extract_text_layer(filename: str, content_bytes: bytes) -> str | None:
+    """Extract text from text-based files (PDF text layer, DOCX, TXT). Returns None if extraction fails."""
     lower = filename.lower()
-
-    # PDF: try pdfplumber first (best CJK support), then PyPDF2
-    if lower.endswith(".pdf"):
-        # --- pdfplumber (primary) ---
-        text = ""
-        try:
-            import pdfplumber
-            with pdfplumber.open(BytesIO(content_bytes)) as pdf:
-                pages = [p.extract_text() or "" for p in pdf.pages]
-            text = "\n".join(pages).strip()
-            if text and not _is_garbled(text):
-                return text
-        except Exception:
-            pass
-
-        # --- PyPDF2 (fallback) ---
-        try:
-            from PyPDF2 import PdfReader
-            reader = PdfReader(BytesIO(content_bytes))
-            pages = [page.extract_text() or "" for page in reader.pages]
-            text = "\n".join(pages).strip()
-            if text and not _is_garbled(text):
-                return text
-        except Exception:
-            pass
-
-        # Both methods failed or produced garbled text
-        if text:
-            raise HTTPException(
-                status_code=400,
-                detail="PDF 文本提取失败（可能是扫描件或加密 PDF），请上传可搜索文本的 PDF 或手动粘贴内容",
-            )
-        raise HTTPException(status_code=400, detail="无法从 PDF 中提取文本内容")
 
     # Word .docx: extract with python-docx
     if lower.endswith(".docx"):
@@ -88,25 +122,22 @@ def _extract_text(filename: str, content_bytes: bytes) -> str:
             doc = Document(BytesIO(content_bytes))
             paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
             text = "\n".join(paragraphs).strip()
-            if text:
-                return text
+            return text if text else None
         except Exception:
-            pass
+            return None
 
-    # Plain text: detect encoding with chardet, fallback to UTF-8 → GBK
+    # Plain text: detect encoding with chardet
     import chardet
     detected = chardet.detect(content_bytes)
     encoding = detected.get("encoding") or "utf-8"
     confidence = detected.get("confidence", 0)
 
-    # chardet can misdetect GBK as ISO-8859-1 / Windows-1252 (which decode every byte
-    # without error, producing garbled text). If confidence is low or the detected
-    # encoding is a single-byte charset, try Chinese encodings first.
     single_byte_encodings = {"iso-8859-1", "iso-8859-2", "iso-8859-5", "iso-8859-9",
                              "windows-1252", "windows-1250", "windows-1251", "windows-1254",
-                             "mac_roman", "latin-1", "latin1", "tis-620",}
+                             "mac_roman", "latin-1", "latin1", "tis-620"}
+
+    # Low confidence or single-byte charset → try Chinese encodings first
     if confidence < 0.6 or encoding.lower() in single_byte_encodings:
-        # Try Chinese encodings first for high-confidence detection
         for fb in ("gb18030", "gbk", "gb2312", "utf-8"):
             try:
                 decoded = content_bytes.decode(fb)
@@ -115,7 +146,6 @@ def _extract_text(filename: str, content_bytes: bytes) -> str:
             except (UnicodeDecodeError, LookupError):
                 continue
 
-    # Try the detected encoding
     try:
         decoded = content_bytes.decode(encoding)
         if not _is_garbled(decoded):
@@ -123,7 +153,6 @@ def _extract_text(filename: str, content_bytes: bytes) -> str:
     except (UnicodeDecodeError, LookupError):
         pass
 
-    # Last resort: try common Chinese encodings
     for fallback in ("utf-8", "gbk", "gb2312", "gb18030"):
         try:
             decoded = content_bytes.decode(fallback)
@@ -132,7 +161,53 @@ def _extract_text(filename: str, content_bytes: bytes) -> str:
         except (UnicodeDecodeError, LookupError):
             continue
 
-    raise HTTPException(status_code=400, detail="无法解析文件内容，请上传 UTF-8/GBK 文本文件、PDF 或 Word 文档")
+    return None
+
+
+# --- Lazy OCR reader singleton ---
+# Creating an EasyOCR reader is expensive (~2-5s model load, ~100MB+ memory).
+# Re-creating it on every PDF upload freezes the request. Cache it at module level.
+
+_ocr_reader = None
+
+
+def _get_ocr_reader():
+    """Return the cached EasyOCR reader, creating it on first call."""
+    global _ocr_reader
+    if _ocr_reader is None:
+        import easyocr
+        _ocr_reader = easyocr.Reader(["ch_sim", "en"], gpu=False)
+    return _ocr_reader
+
+
+def _ocr_extract(filename: str, content_bytes: bytes) -> str | None:
+    """Extract text from image-based files via OCR. Currently supports PDF → page images → EasyOCR."""
+    lower = filename.lower()
+
+    if lower.endswith(".pdf"):
+        try:
+            import fitz  # PyMuPDF
+            import numpy as np
+
+            reader = _get_ocr_reader()
+            doc = fitz.open(stream=content_bytes, filetype="pdf")
+            pages_text: list[str] = []
+            for page in doc:
+                pix = page.get_pixmap(dpi=200)
+                img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width, pix.n
+                )
+                results = reader.readtext(img_array, detail=0)
+                page_text = "\n".join(results)
+                pages_text.append(page_text)
+            doc.close()
+
+            text = "\n".join(pages_text).strip()
+            return text if text and not _is_garbled(text) else None
+        except Exception:
+            pass
+
+    return None
 
 
 # --- Knowledge Bases ---

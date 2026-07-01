@@ -232,7 +232,7 @@ function statusClassName(key: string | number): string {
         <!-- Create KB -->
         <section class="panel">
           <h3>New Knowledge Base</h3>
-          <p class="panel-desc">Upload company reimbursement policy documents</p>
+          <p class="panel-desc">Upload company reimbursement policy documents — supported formats: <strong>.txt</strong>, <strong>.docx</strong>, <strong>.pdf</strong></p>
           <div class="kb-create">
             <input v-model="kbName" placeholder="Knowledge base name" class="input-dark" />
             <input v-model="kbDesc" placeholder="Description (optional)" class="input-dark" />
@@ -258,7 +258,7 @@ function statusClassName(key: string | number): string {
               </div>
               <div class="kb-actions">
                 <label :class="['btn-sm', { loading: uploadingDoc === kb.id }]">
-                  <input type="file" hidden @change="uploadDoc(kb.id, $event)" @click.stop />
+                  <input type="file" hidden @change="uploadDoc(kb.id, $event)" @click.stop accept=".txt,.docx,.pdf" />
                   {{ uploadingDoc === kb.id ? 'Uploading...' : 'Upload Doc' }}
                 </label>
                 <button class="btn-sm btn-danger" @click.stop="deleteKB(kb.id)">Delete</button>

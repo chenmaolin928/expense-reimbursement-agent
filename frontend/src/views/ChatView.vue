@@ -3,6 +3,9 @@ import { ref, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
+import InvoiceCard from '../components/InvoiceCard.vue'
+import PolicyCard from '../components/PolicyCard.vue'
+import CorrectionForm from '../components/CorrectionForm.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -15,6 +18,9 @@ const streamingMessages = ref<any[]>([])
 const uploadedFiles = ref<string[]>([])
 const uploading = ref(false)
 const processing = ref(false)
+const currentInvoiceData = ref<any>(null)
+const currentPolicyData = ref<any>(null)
+const showingCorrection = ref(false)
 
 onMounted(async () => {
   await chat.fetchSessions()
@@ -113,6 +119,34 @@ async function send() {
             toolTracker.steps.forEach((step: any) => {
               if (step.status === 'running') step.status = 'done'
             })
+          } else if (evt.type === 'invoice_card') {
+            // Invoice scan completed → show structured card
+            currentInvoiceData.value = evt.data
+            showingCorrection.value = false
+            streamingMessages.value.push({
+              role: 'invoice_card',
+              data: evt.data,
+              timestamp: Date.now(),
+            })
+          } else if (evt.type === 'policy_card') {
+            // Policy match completed → show analysis card (reimbursement flow only)
+            currentPolicyData.value = evt.data
+            showingCorrection.value = false
+            streamingMessages.value.push({
+              role: 'policy_card',
+              data: evt.data,
+              timestamp: Date.now(),
+            })
+          } else if (evt.type === 'knowledge_refs') {
+            // Pure consultation — AI already gave natural-language summary.
+            // Show collapsible source citations only (no action buttons).
+            streamingMessages.value.push({
+              role: 'knowledge_refs',
+              data: evt.data,
+              timestamp: Date.now(),
+            })
+          } else if (evt.type === 'confirmation_request') {
+            // Agent requests user confirmation — already handled by card buttons
           } else if (evt.type === 'error') {
             toolTracker.done = true
           }
@@ -144,6 +178,157 @@ async function handleFileUpload(e: Event) {
 
 function scrollDown() {
   nextTick(() => { if (chatBox.value) chatBox.value.scrollTop = chatBox.value.scrollHeight })
+}
+
+// ---- Card event handlers ----
+
+function handleInvoiceConfirm(data: any) {
+  // User confirmed invoice data → send confirmation message to agent
+  const msg = '确认发票信息无误，请继续查询报销政策'
+  streamingMessages.value.push({ role: 'user', content: msg })
+  sendFollowUp(msg)
+}
+
+function handleInvoiceCorrect(data: any) {
+  // Show correction form pre-filled with invoice fields
+  currentInvoiceData.value = data
+  showingCorrection.value = true
+  streamingMessages.value.push({
+    role: 'correction_form',
+    data,
+    timestamp: Date.now(),
+  })
+}
+
+async function handleCorrectionSubmit(fields: Record<string, string | number>) {
+  // User submitted corrected fields → re-search policy
+  if (!chat.currentSessionId || !currentInvoiceData.value) return
+  showingCorrection.value = false
+
+  const changesStr = Object.entries(fields)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join(', ')
+  streamingMessages.value.push({
+    role: 'user',
+    content: `修正发票信息：${changesStr}`,
+  })
+
+  // Add agent-status chip
+  const tracker: any = { role: 'agent-status', tools: [], done: false, steps: [], plan: [] }
+  streamingMessages.value.push(tracker)
+
+  try {
+    const result = await chat.correctSearch(
+      chat.currentSessionId,
+      currentInvoiceData.value.invoice_path,
+      fields,
+    )
+    tracker.done = true
+    currentPolicyData.value = result
+    streamingMessages.value.push({
+      role: 'policy_card',
+      data: result,
+      timestamp: Date.now(),
+    })
+  } catch (e) {
+    console.error('Correct search failed:', e)
+    tracker.done = true
+  }
+  scrollDown()
+}
+
+function handleCorrectionCancel() {
+  showingCorrection.value = false
+  // Remove the correction form message
+  const idx = streamingMessages.value.findIndex((m: any) => m.role === 'correction_form')
+  if (idx >= 0) streamingMessages.value.splice(idx, 1)
+}
+
+function handlePolicyConfirm() {
+  // User confirmed policy → send confirmation to agent
+  if (!chat.currentSessionId) return
+  const msg = '好的，确认无误，请帮我提交报销'
+  streamingMessages.value.push({ role: 'user', content: msg })
+  sendFollowUp(msg)
+}
+
+function handlePolicyCorrect(data: any) {
+  // Out-of-scope or correction → show correction form
+  const invoiceData = data?.invoice_fields
+    ? { fields: data.invoice_fields, invoice_path: '' }
+    : currentInvoiceData.value
+  if (invoiceData) {
+    currentInvoiceData.value = invoiceData
+    showingCorrection.value = true
+    streamingMessages.value.push({
+      role: 'correction_form',
+      data: invoiceData,
+      timestamp: Date.now(),
+    })
+  }
+}
+
+async function sendFollowUp(message: string) {
+  // Send a follow-up message to the agent (for confirm/correct actions)
+  if (!chat.currentSessionId || processing.value) return
+  processing.value = true
+
+  const tracker: any = { role: 'agent-status', tools: [], done: false, steps: [], plan: [] }
+  streamingMessages.value.push(tracker)
+
+  try {
+    const res = await chat.sendMessage(chat.currentSessionId, message, [])
+    const reader = res.body?.getReader()
+    if (!reader) { processing.value = false; return }
+
+    const decoder = new TextDecoder()
+    let buf = ''
+    let assistantStarted = false
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() || ''
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const evt = JSON.parse(line.slice(6))
+          if (evt.type === 'thinking') {
+            const token = evt.content || ''
+            if (assistantStarted) {
+              const last = streamingMessages.value[streamingMessages.value.length - 1]
+              if (last?.role === 'assistant') last.content += token
+            } else {
+              assistantStarted = true
+              streamingMessages.value.push({ role: 'assistant', content: token })
+            }
+          } else if (evt.type === 'message' && evt.role === 'assistant') {
+            tracker.done = true
+            if (assistantStarted) {
+              const last = streamingMessages.value[streamingMessages.value.length - 1]
+              if (last?.role === 'assistant') last.content = evt.content || ''
+            } else {
+              streamingMessages.value.push({ role: 'assistant', content: evt.content || '' })
+            }
+          } else if (evt.type === 'tool_call') {
+            tracker.tools.push({ name: evt.tool, status: 'running' })
+          } else if (evt.type === 'tool_result') {
+            const t = tracker.tools.find((x: any) => x.name === evt.tool && x.status === 'running')
+            if (t) t.status = 'done'
+          } else if (evt.type === 'done') {
+            tracker.done = true
+          } else if (evt.type === 'error') {
+            tracker.done = true
+          }
+        }
+      }
+      scrollDown()
+    }
+  } catch (e) {
+    console.error('Follow-up error:', e)
+  }
+  processing.value = false
+  scrollDown()
 }
 
 function logout() { auth.logout(); router.push('/login') }
@@ -258,6 +443,49 @@ function logout() { auth.logout(); router.push('/login') }
           <!-- Tool from DB -->
           <div v-else-if="m.role === 'tool'" class="msg-tool-db">
             <code>{{ m.tool_name }}</code>
+          </div>
+
+          <!-- Invoice Card -->
+          <div v-else-if="m.role === 'invoice_card'" class="msg-card-row">
+            <InvoiceCard
+              :data="m.data"
+              @confirm="handleInvoiceConfirm"
+              @correct="handleInvoiceCorrect"
+            />
+          </div>
+
+          <!-- Policy Card -->
+          <div v-else-if="m.role === 'policy_card'" class="msg-card-row">
+            <PolicyCard
+              :data="m.data"
+              @confirm="handlePolicyConfirm"
+              @correct="handlePolicyCorrect"
+              @cancel="() => {}"
+            />
+          </div>
+
+          <!-- Knowledge Refs (consultation mode — readonly, no action buttons) -->
+          <div v-else-if="m.role === 'knowledge_refs'" class="msg-card-row">
+            <PolicyCard
+              :data="{
+                verdict: 'in_scope',
+                summary: '',
+                policy_refs: m.data.references,
+                total_results: m.data.references?.length ?? 0,
+                breakdown: null,
+              }"
+              :readonly="true"
+            />
+          </div>
+
+          <!-- Correction Form -->
+          <div v-else-if="m.role === 'correction_form'" class="msg-card-row">
+            <CorrectionForm
+              :fields="m.data.fields"
+              :invoice-path="m.data.invoice_path"
+              @submit="handleCorrectionSubmit"
+              @cancel="handleCorrectionCancel"
+            />
           </div>
         </div>
       </div>
@@ -503,6 +731,11 @@ function logout() { auth.logout(); router.push('/login') }
 .msg-tool-db code {
   font-size: 11px; padding: 3px 10px; background: rgba(255,255,255,0.03); border-radius: 12px;
   color: rgba(255,255,255,0.25);
+}
+
+.msg-card-row {
+  display: flex; justify-content: flex-start;
+  margin-bottom: 4px;
 }
 
 /* Upload bar */

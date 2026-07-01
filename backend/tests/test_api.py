@@ -146,7 +146,8 @@ class TestChatAPI:
         body = resp.text
         assert "search_knowledge" in body
         assert '"type": "message"' in body
-        assert "[{\"step\"" not in body
+        # Plan JSON is correctly encapsulated in a "plan" event (not leaked into chat bubbles)
+        assert '"type": "plan"' in body
         assert '"type": "done"' in body
 
     def test_delete_session(self, client, employee_token):

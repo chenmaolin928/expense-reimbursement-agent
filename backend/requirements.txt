@@ -17,7 +17,6 @@ chardet>=5.0.0
 python-multipart>=0.0.12
 python-jose[cryptography]>=3.3.0
 httpx>=0.27.0
-PyPDF2>=3.0.0
 python-docx>=1.0.0
 
 # Knowledge Base - ChromaDB semantic search
@@ -26,6 +25,7 @@ sentence-transformers>=3.0.0
 
 # OCR
 easyocr>=1.7.0
+PyMuPDF>=1.24.0
 
 # Dev / Test
 pytest>=8.0.0

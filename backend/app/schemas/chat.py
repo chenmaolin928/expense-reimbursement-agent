@@ -40,3 +40,8 @@ class SessionResponse(BaseModel):
 
 class SessionDetail(SessionResponse):
     messages: list[ChatMessageResponse] = []
+
+
+class CorrectSearchRequest(BaseModel):
+    invoice_path: str                                           # 原发票路径
+    corrected_fields: dict[str, str | float]                    # 用户修正后的字段 {"category": "办公用品", "amount": 1200}

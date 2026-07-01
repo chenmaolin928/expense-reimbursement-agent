@@ -19,9 +19,11 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 
-from app.infrastructure.llm_client import get_model
+from app.infrastructure.llm_client import get_model, MOCK_MODE
 from app.services.tools import get_all_tools, set_tool_context
 from app.services.session_agent import SessionAgentManager
+from app.services.invoice_card_service import build_invoice_card
+from app.services.policy_card_service import build_policy_card, build_policy_card_out_of_scope
 from app.config import settings
 
 # ============================================================
@@ -53,6 +55,17 @@ SYSTEM_PROMPT = """你是公司内部的报销助手 AI Agent。你的名字叫"
 5. **提交执行**: 用户确认后，调 submit_reimbursement 提交
 6. **通知结果**: 提交完成后，调 send_notification 通知用户
 
+## 意图识别
+
+用户消息可能是报销请求，也可能是政策咨询。你需要智能判断意图，不要追问：
+- 用户提到「餐补」「住宿标准」「差旅标准」「什么可以报」「能报吗」等 → 理解为**政策咨询**
+  → 调用 search_knowledge 查询，然后用自然语言总结政策要点
+  → **不要**问「您是想咨询政策还是想报销？」
+  → **不要**要求用户上传发票
+- 用户上传了发票文件 + 提到「报销」→ 理解为**报销请求**
+  → 走 scan_invoice → search_knowledge → 确认 → 提交流程
+- 用户直接说「帮我报销」但没有上传 → 告知需要上传发票
+
 ## 决策原则
 
 - 金额在标准范围内 → 可报销，向用户确认后提交
@@ -68,6 +81,9 @@ SYSTEM_PROMPT = """你是公司内部的报销助手 AI Agent。你的名字叫"
 - 提交前必须获得用户确认
 - 你是决策和执行引擎 — 可以改变系统状态，不只是回答问题
 - 所有操作都有审计日志，请认真对待每笔报销
+- 当 search_knowledge 返回结果且用户没有上传发票时，你必须用自然语言总结政策内容。
+  不要只说「请查看卡片」，而要在文字回复中引用具体的政策条款和金额上限。
+  文字总结应包含：适用范围、金额标准、报销比例、上限、特殊条件。
 
 ## 纯闲聊/非报销问题
 如果用户不是问报销相关问题，直接用中文友好回复，不需要调用工具。
@@ -107,6 +123,7 @@ PLAN_PROMPT = """你是一个报销审批系统的任务编排器。根据用户
 4. 用户问政策/标准/类型/条件 → search_knowledge
 5. 用户打招呼/闲聊/自我介绍 → []
 6. 用户说"报销"但没有发票文件 → 直接回复请用户上传，plan 返回 []
+7. 用户问「餐补」「住宿标准」「差旅标准」等政策咨询类关键词 → 生成 search_knowledge 计划，不要返回空计划
 
 请直接输出一个 JSON 数组，不要输出其他任何内容:
 [{"step": "步骤描述", "tool": "工具名", "args": {"参数名": "参数值"}}]
@@ -279,9 +296,14 @@ def after_act(state: AgentState) -> Literal["tools", "__end__"]:
 
 
 def after_observe(state: AgentState) -> Literal["act", "__end__"]:
-    """After observe: if plan not complete, back to act; else end."""
-    plan_complete = state.get("plan_complete", True)
-    if plan_complete:
+    """After observe: always route back to act so the LLM can process tool results.
+
+    The ReAct loop ends ONLY via after_act (when the LLM produces no tool_calls).
+    The plan is a guide, not a hard execution boundary — the LLM must always have
+    a chance to synthesize tool results into a user-facing response.
+    """
+    iteration = state.get("iteration_count", 0)
+    if iteration >= 20:
         return "__end__"
     return "act"
 
@@ -346,7 +368,7 @@ async def run_agent(
     if message_history:
         for m in message_history:
             if m["role"] == "user":
-                input_messages.append(HumanMessage(content=_strip_attachment_markers(m["content"] or "")))
+                input_messages.append(HumanMessage(content=m["content"]))
             elif m["role"] == "assistant":
                 input_messages.append(AIMessage(content=m["content"] or ""))
 
@@ -356,6 +378,9 @@ async def run_agent(
     config = {"configurable": {"thread_id": session_id}}
     content_acc = ""
     plan_emitted = False
+    plan_buffer = ""  # Buffer plan-node tokens so they never leak to the UI
+    last_invoice_result: dict | None = None  # Track scan_invoice result for card generation
+    last_search_result: dict | None = None   # Track search_knowledge result for card generation
 
     async for event in agent.astream_events(
         {"messages": input_messages, "session_id": session_id},
@@ -368,8 +393,11 @@ async def run_agent(
             chunk = event["data"]["chunk"]
             token = str(chunk.content) if chunk.content else ""
             if token:
-                # Filter out plan JSON from streaming output
-                if not plan_emitted and (token.strip().startswith("[{") or token.strip().startswith("```")):
+                if not plan_emitted:
+                    # Buffer plan-node tokens silently — never leak JSON to the UI.
+                    # Single '[', ']', '[{', '[]' tokens are all part of the plan JSON
+                    # and would show as garbage in the chat bubble if streamed.
+                    plan_buffer += token
                     continue
                 content_acc += token
                 events.append({"type": "thinking", "content": token})
@@ -380,12 +408,22 @@ async def run_agent(
 
             # Check if this is plan output (from plan_node)
             if not plan_emitted and not tool_calls:
-                plan = _parse_plan(str(output.content))
-                if plan:
+                raw = str(output.content).strip()
+                # Any output starting with '[' or '```' from plan_node is a JSON plan.
+                # Handle both [{...}] (steps) and [] (empty plan — casual chat).
+                if raw.startswith("[") or raw.startswith("```"):
+                    plan = _parse_plan(str(output.content))
                     events.append({"type": "plan", "steps": plan})
                     plan_emitted = True
+                    plan_buffer = ""  # discard — it was plan JSON
                     content_acc = ""
                     continue
+                else:
+                    # plan_node returned non-JSON content (rare); flush buffer
+                    if plan_buffer.strip():
+                        events.append({"type": "thinking", "content": plan_buffer})
+                    plan_emitted = True
+                    plan_buffer = ""
 
             if tool_calls:
                 for tc in tool_calls:
@@ -401,6 +439,40 @@ async def run_agent(
                 if content_acc.strip():
                     events.append({"type": "message", "role": "assistant", "content": content_acc.strip()})
                 content_acc = ""
+
+                # ---- Card / Refs dispatch AFTER LLM has produced its response ----
+                # The LLM has already streamed its natural-language summary.
+                # Now emit structured UI events based on whether we have invoice data.
+                if last_search_result:
+                    if last_invoice_result:
+                        # Scenario A: Reimbursement flow — has invoice + policy search
+                        # Emit policy_card with judgment + confirmation_request
+                        judgment = _synthesize_policy_judgment(last_invoice_result, last_search_result)
+                        card = build_policy_card(last_search_result, judgment)
+                        events.append(card)
+                        verdict = card["data"].get("verdict", "in_scope")
+                        if verdict == "in_scope":
+                            events.append({
+                                "type": "confirmation_request",
+                                "data": {
+                                    "message": card["data"].get("summary", ""),
+                                    "actions": ["confirm", "correct", "cancel"],
+                                    "context": "policy_review",
+                                },
+                            })
+                    else:
+                        # Scenario B: Pure consultation — no invoice, AI already summarized
+                        # Emit knowledge_refs (collapsible source citations only, no actions)
+                        events.append({
+                            "type": "knowledge_refs",
+                            "data": {
+                                "references": _extract_policy_refs(last_search_result),
+                                "collapsed": True,
+                            },
+                        })
+                    # Reset for next turn
+                    last_invoice_result = None
+                    last_search_result = None
 
         elif kind == "on_tool_end":
             raw = event["data"]["output"]
@@ -418,6 +490,18 @@ async def run_agent(
                 "status": "failed" if has_error else "done",
             })
 
+            # Emit invoice_card after scan_invoice completes (data display only)
+            if tool_name == "scan_invoice" and not has_error and isinstance(result, dict):
+                last_invoice_result = result
+                desensitization = _build_desensitization(employee_id, user_id)
+                card = build_invoice_card(result, desensitization)
+                events.append(card)
+
+            # Record search_knowledge result — card/refs dispatch happens
+            # AFTER the LLM has produced its natural-language summary
+            if tool_name == "search_knowledge" and not has_error and isinstance(result, dict):
+                last_search_result = result
+
     if content_acc.strip():
         events.append({"type": "message", "role": "assistant", "content": content_acc.strip()})
 
@@ -425,27 +509,143 @@ async def run_agent(
     return events
 
 
-def _strip_attachment_markers(content: str) -> str:
-    """Remove persisted upload markers from historical user messages.
+def _build_desensitization(employee_id: int | None, user_id: int) -> dict:
+    """Build desensitization info for card display. Returns {entity_type: {status, token}}."""
+    if not employee_id:
+        return {}
+    try:
+        from app.database import SessionLocal
+        from app.services.desensitization_service import DesensitizationService
+        db = SessionLocal()
+        try:
+            svc = DesensitizationService(db)
+            result = svc.desensitize_employee(employee_id)
+            tokens = result.get("tokens", {})
+            return {
+                key: {"status": "hidden", "token": token}
+                for key, token in tokens.items()
+            }
+        finally:
+            db.close()
+    except Exception:
+        return {}
 
-    Attachments are turn-scoped. Leaving old markers in history makes later
-    turns look like they still include uploaded files, which can wrongly bias
-    both mock and real models toward invoice-scanning behavior.
+
+def _extract_policy_refs(search_result: dict) -> list[dict]:
+    """Extract source reference list from search_knowledge result for UI display."""
+    refs = []
+    for r in (search_result.get("results") or [])[:5]:
+        refs.append({
+            "source": r.get("filename", "未知文档"),
+            "snippet": r.get("snippet", ""),
+            "kb_name": r.get("kb_name", ""),
+            "score": r.get("score", 0),
+        })
+    return refs
+
+
+def _synthesize_policy_judgment(invoice_result: dict, search_result: dict) -> dict:
+    """Synthesize LLM judgment from invoice and policy search results.
+
+    In mock mode or when LLM hasn't explicitly judged, this provides a
+    deterministic fallback based on policy snippet matching.
     """
-    text = str(content or "")
-    prefixes = ("[已上传文件:", "[已上传文件：", "[Uploaded:", "[uploaded:")
+    results = search_result.get("results", [])
+    category_raw = invoice_result.get("category_raw", "other")
+    amount = invoice_result.get("amount", 0)
 
-    while True:
-        stripped = text.lstrip()
-        matched = False
-        for prefix in prefixes:
-            if stripped.startswith(prefix):
-                line_end = stripped.find("\n")
-                text = "" if line_end == -1 else stripped[line_end + 1 :]
-                matched = True
-                break
-        if not matched:
-            return text.lstrip()
+    verdict = "in_scope"
+    summary = ""
+    breakdown = None
+
+    # Try to find a matching policy snippet
+    matched_snippet = ""
+    for r in results:
+        snippet = r.get("snippet", "")
+        if category_raw in snippet.lower() or any(
+            kw in snippet for kw in ["报销", "标准", "上限", "比例"]
+        ):
+            matched_snippet = snippet
+            break
+
+    if not matched_snippet and results:
+        matched_snippet = results[0].get("snippet", "")
+
+    # Build summary based on category
+    category_labels = {
+        "meals": "餐饮", "travel": "差旅", "transportation": "交通",
+        "office_supplies": "办公用品", "entertainment": "商务招待",
+    }
+    cat_label = category_labels.get(category_raw, category_raw)
+
+    if category_raw in ("meals", "travel", "transportation", "office_supplies", "entertainment"):
+        # In-scope category
+        verdict = "in_scope"
+        # Try to extract policy limits from snippet
+        rate, cap = _extract_policy_limits(matched_snippet, category_raw)
+        calculated = round(amount * rate, 2) if rate else amount
+        final_amount = min(calculated, cap) if cap else calculated
+
+        if cap and calculated > cap:
+            summary = (
+                f"{cat_label}报销：可报 {int(rate*100)}%，单次上限 {cap} 元。"
+                f"发票 {amount} 元 → 预计报销 {final_amount} 元。"
+            )
+        elif rate:
+            summary = (
+                f"{cat_label}报销：可报 {int(rate*100)}%。"
+                f"发票 {amount} 元 → 预计报销 {calculated} 元。"
+            )
+        else:
+            summary = f"{cat_label}在报销范围内。发票 {amount} 元，请确认是否提交报销。"
+
+        breakdown = {
+            "invoice_amount": amount,
+            "reimbursement_rate": rate,
+            "calculated_amount": calculated,
+            "cap": cap,
+            "final_amount": final_amount,
+        }
+    elif category_raw == "other":
+        verdict = "out_of_scope"
+        summary = f"未能识别发票品类（{cat_label}），请确认类别后重新查询。"
+    else:
+        verdict = "out_of_scope"
+        summary = f"该发票品类（{cat_label}）不在公司报销范围内。"
+
+    return {
+        "verdict": verdict,
+        "summary": summary,
+        "breakdown": breakdown,
+    }
+
+
+def _extract_policy_limits(snippet: str, category: str) -> tuple[float, float | None]:
+    """Extract reimbursement rate and cap from a policy snippet.
+
+    Returns (rate, cap). rate is 0.0–1.0, cap is absolute amount or None.
+    """
+    import re
+
+    rate = 0.6 if category == "meals" else 0.8  # default rates
+    cap: float | None = None
+
+    # Try to extract rate from snippet
+    rate_match = re.search(r"(\d+)\s*%", snippet)
+    if rate_match:
+        rate = int(rate_match.group(1)) / 100.0
+
+    # Try to extract cap/上限
+    cap_match = re.search(r"(?:上限|不超过|≤)\s*(\d+)", snippet)
+    if cap_match:
+        cap = float(cap_match.group(1))
+
+    # Category-specific defaults if not found in snippet
+    if cap is None:
+        defaults = {"meals": 500, "travel": 500, "transportation": 200, "office_supplies": 500, "entertainment": 1000}
+        cap = defaults.get(category)
+
+    return rate, cap
 
 
 def _parse_tool_result(raw) -> dict | str:

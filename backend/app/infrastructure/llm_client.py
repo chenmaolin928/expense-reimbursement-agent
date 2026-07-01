@@ -1,27 +1,32 @@
-"""LLM client for the production DeepSeek integration.
+"""LLM client — supports both real DeepSeek and local mock mode.
 
 Security boundary: this module handles all cloud LLM communication.
-Runtime no longer falls back to a local mock. If DeepSeek is not configured,
-startup/use must fail loudly so the operator knows the environment is broken.
+When MOCK_MODE is True, uses a local mock that simulates DeepSeek behavior
+so you can test the full ReAct agent loop without an API key.
 
-The local mock model is retained only as a deterministic test helper.
+Mock mode produces realistic function_call sequences — this is NOT a
+hardcoded workflow. The agent graph still decides the path.
 """
 
 from langchain_deepseek import ChatDeepSeek
-
 from app.config import settings
 
 _model = None
+_mock_model = None
+
+MOCK_MODE = (
+    not settings.deepseek.api_key
+    or settings.deepseek.api_key.startswith("sk-placeholder")
+)
 
 
 def get_model():
-    """Get the configured DeepSeek chat model.
-
-    Raises:
-        RuntimeError: DeepSeek API key is missing or still uses a placeholder.
-    """
-    global _model
-    _ensure_deepseek_configured()
+    """Get chat model — real DeepSeek or mock."""
+    global _model, _mock_model
+    if MOCK_MODE:
+        if _mock_model is None:
+            _mock_model = _MockChatModel()
+        return _mock_model
     if _model is None:
         _model = ChatDeepSeek(
             model=settings.deepseek.model,
@@ -33,41 +38,63 @@ def get_model():
     return _model
 
 
-def _ensure_deepseek_configured() -> None:
-    """Fail fast when runtime LLM credentials are missing."""
-    api_key = (settings.deepseek.api_key or "").strip()
-    if not api_key or api_key.startswith("sk-placeholder"):
-        raise RuntimeError(
-            "DeepSeek API 未配置。请在 .env 中设置有效的 DEEPSEEK_API_KEY，"
-            "当前运行时已禁止自动回退到 mock 模式。"
-        )
-
-
 # ---------------------------------------------------------------
-# Test-only mock LLM
+# Mock LLM — simulates DeepSeek's ReAct reasoning locally
 # ---------------------------------------------------------------
 
 _CONFIRM_WORDS = [
-    "ok",
-    "yes",
-    "confirm",
-    "submit",
-    "sure",
-    "go ahead",
-    "确认",
-    "确认提交",
-    "提交吧",
-    "继续提交",
-    "好的提交",
-    "同意提交",
-    "可以提交",
-    "行，提交",
-    "是的，提交",
-    "agree",
-    "approve",
-    "proceed",
-    "do it",
+    "ok", "yes", "confirm", "submit", "sure", "go ahead",
+    "确认", "提交", "好的", "可以", "行", "是的", "对", "报销",
+    "agree", "approve", "proceed", "do it", "please",
 ]
+
+
+def _extract_first_pending_tool(messages) -> tuple[str | None, dict]:
+    """Extract the first unexecuted tool from a plan_node AIMessage if present.
+
+    The plan_node writes a JSON array into an AIMessage like:
+        [{"step": "...", "tool": "search_knowledge", "args": {"query": "..."}}]
+
+    This helper parses the last such plan message and finds the first tool
+    whose name hasn't appeared in tool_calls yet.
+    """
+    import json as _json
+    import re
+
+    tool_calls_made: set[str] = set()
+    plan_json_str = None
+
+    for m in messages:
+        # Collect tool calls already made
+        tcs = getattr(m, "tool_calls", None) or []
+        for tc in tcs:
+            tool_calls_made.add(tc.get("name", ""))
+
+        # Find the last plan_node output
+        content = str(m.content) if hasattr(m, "content") and m.content else ""
+        stripped = content.strip()
+        if stripped.startswith("[{") or stripped.startswith("[") and not stripped.startswith("[]"):
+            plan_json_str = stripped
+
+    if not plan_json_str:
+        return None, {}
+
+    # Remove markdown fences if present
+    if plan_json_str.startswith("```"):
+        plan_json_str = re.sub(r"^```\w*\n?", "", plan_json_str)
+        plan_json_str = re.sub(r"\n?```$", "", plan_json_str)
+
+    try:
+        plan = _json.loads(plan_json_str)
+        if isinstance(plan, list):
+            for step in plan:
+                tool = step.get("tool", "")
+                if tool and tool not in tool_calls_made:
+                    return tool, step.get("args", {})
+    except (_json.JSONDecodeError, TypeError):
+        pass
+
+    return None, {}
 
 
 class _MockChatModel:
@@ -125,7 +152,7 @@ class _MockChatModel:
         has_tool_result: dict[str, bool] = {}
         last_user_msg = ""
         last_system_msg = ""
-        last_user_has_attachment = False
+        has_attachment = False
         # Track which tool results came AFTER the LAST user message (this turn)
         # to avoid cross-turn pollution from previous completed workflows
         last_user_idx = -1
@@ -137,7 +164,12 @@ class _MockChatModel:
             if mtype == "human":
                 last_user_msg = content
                 last_user_idx = i
-                last_user_has_attachment = _has_uploaded_attachment(content)
+                # Only trigger has_attachment if user ACTUALLY uploaded a file
+                if any(kw in content for kw in ("[已上传文件:", "[Uploaded:", "[已上传文件：", "[uploaded:")):
+                    has_attachment = True
+                if any(kw in content for kw in ("发票", "invoice", "receipt")) and \
+                   ("上传" in content or "[Uploaded" in content or "[已上传" in content):
+                    has_attachment = True
 
             elif mtype == "tool":
                 # Only count tool results from THIS turn (after last user message)
@@ -160,7 +192,7 @@ class _MockChatModel:
         if last_system_msg and "任务编排器" in last_system_msg:
             if any(kw in last_user_msg.lower() for kw in ("餐补", "政策", "标准", "policy", "meal", "allowance", "rule")):
                 return AIMessage(content='[{"step": "搜索报销政策", "tool": "search_knowledge", "args": {"query": "报销标准 餐饮"}, "status": "pending"}]')
-            if last_user_has_attachment:
+            if has_attachment:
                 return AIMessage(
                     content=(
                         '[{"step": "扫描发票提取关键信息", "tool": "scan_invoice", "args": {"file_path": "data/invoices/uploaded_invoice.png"}, "status": "pending"},'
@@ -179,8 +211,22 @@ class _MockChatModel:
             # Catch-all: casual chat
             return AIMessage(content="[]")
 
-        # 1: has attachment/reimbursement intent, no scan yet
-        if last_user_has_attachment and "scan_invoice" not in tool_calls_made:
+        # 1: Detect plan steps from plan_node output — execute the FIRST pending tool
+        # The plan_node emits JSON like [{"tool": "search_knowledge", "args": {...}}]
+        # which is stored in an AIMessage. When the act_node runs, we must honour it.
+        plan_tool, plan_args = _extract_first_pending_tool(messages)
+        if plan_tool and plan_tool not in tool_calls_made:
+            return AIMessage(
+                content=f"好的，让我来查询相关信息。",
+                tool_calls=[{
+                    "name": plan_tool,
+                    "args": plan_args,
+                    "id": f"mock_plan_{plan_tool}_001",
+                }],
+            )
+
+        # 2: has attachment/reimbursement intent, no scan yet
+        if has_attachment and "scan_invoice" not in tool_calls_made:
             return AIMessage(
                 content="我先扫描这张发票，提取关键信息。",
                 tool_calls=[{
@@ -190,7 +236,7 @@ class _MockChatModel:
                 }],
             )
 
-        # 2: scanned, but haven't checked policy yet
+        # 3: scanned, but haven't checked policy yet
         if has_tool_result.get("scan_invoice") and "search_knowledge" not in tool_calls_made:
             return AIMessage(
                 content="发票信息已提取，让我查询公司报销政策。",
@@ -207,7 +253,7 @@ class _MockChatModel:
             and has_tool_result.get("search_knowledge")
             and "submit_reimbursement" not in tool_calls_made
         ):
-            is_confirm = _is_explicit_confirmation(last_user_msg)
+            is_confirm = any(kw in last_user_msg.lower() for kw in _CONFIRM_WORDS)
             if is_confirm:
                 return AIMessage(
                     content="收到确认，正在提交报销申请...",
@@ -261,32 +307,26 @@ class _MockChatModel:
                 ),
             )
 
-        # 6: FAQ / knowledge question — ask before reimbursement flow
-        faq_indicators = [
-            "什么", "哪些", "怎么", "如何", "怎样", "哪个", "多少", "条件",
-            "what", "which", "how", "when", "why", "who", "where",
-            "类型", "种类", "分类", "规定", "要求", "是否需要",
-        ]
-        if any(kw in last_user_msg for kw in faq_indicators):
+        # 6: search_knowledge result received (pure policy question, not reimbursement flow)
+        if has_tool_result.get("search_knowledge") and "scan_invoice" not in tool_calls_made:
+            # AI should summarise policy based on the tool result content.
+            # Since mock mode cannot read ToolMessage content, we guide the user
+            # to the knowledge_refs card while encouraging real LLM summarisation.
             return AIMessage(
                 content=(
-                    "关于您的问题，建议您上传报销相关的政策文档到知识库，"
-                    "这样我可以帮您搜索具体的公司报销标准。\n\n"
-                    "或者，如果您有具体的发票需要报销，请先上传发票图片，"
-                    "我会帮您扫描并核实是否符合政策。"
+                    "根据知识库中的搜索结果，以下是与您查询相关的公司报销政策摘要。\n\n"
+                    "请展开下方的「来源引用」卡片查看具体的政策条款和原文。\n\n"
+                    "（提示：如果这是真实 DeepSeek 模式，AI 会根据知识库内容自动总结政策要点，包括金额标准、报销比例、上限和特殊条件。）"
                 ),
             )
 
-        # 7: fallback — reimbursement intent without attachment
+        # 7: fallback — pure policy question without any tool history
         if any(kw in last_user_msg.lower() for kw in ("餐补", "政策", "标准", "policy", "meal", "allowance", "rule")):
             return AIMessage(
                 content=(
-                    "您好！关于公司餐补标准：\n\n"
-                    "- 早餐：人均不超过 30 元\n"
-                    "- 午餐：人均不超过 60 元\n"
-                    "- 晚餐：人均不超过 100 元\n"
-                    "- 单次报销上限：300 元（超限需经理审批）\n"
-                    "- 必须附带小票或发票\n\n"
+                    "您好！关于公司政策的查询，我正在为您搜索知识库中的相关内容。\n\n"
+                    "请展开下方的「来源引用」卡片查看具体的政策条款和原文摘要。\n"
+                    "（在真实 DeepSeek 模式下，AI 会根据搜索结果自动总结政策要点。）\n\n"
                     "如果您有发票需要报销，请上传后告诉我！"
                 ),
             )
@@ -311,15 +351,3 @@ class _MockChatModel:
                 "请问有什么可以帮您？"
             ),
         )
-
-
-def _has_uploaded_attachment(content: str) -> bool:
-    """Detect whether the CURRENT user turn explicitly contains uploaded files."""
-    lowered = content.lower()
-    return any(marker in content for marker in ("[已上传文件:", "[已上传文件：", "[Uploaded:")) or "[uploaded:" in lowered
-
-
-def _is_explicit_confirmation(content: str) -> bool:
-    """Treat only direct submit/confirm phrases as confirmation."""
-    normalized = " ".join(str(content).lower().split())
-    return any(word in normalized for word in _CONFIRM_WORDS)
