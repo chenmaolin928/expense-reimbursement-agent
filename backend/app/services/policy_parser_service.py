@@ -29,6 +29,30 @@ POLICY_PARSE_SYSTEM_PROMPT = """你是一个企业报销政策解析器。你的
 
 ----------------------
 
+字段填写规则（必须严格遵守）：
+
+type 只能填以下 6 个值之一：
+  - "limit"        金额/数量上限（如"不超过500元"、"每天最多2次"）
+  - "ratio"         报销比例（如"报销80%"、"公司承担60%"）
+  - "approval"      审批门槛（如"超过1000元需经理审批"）
+  - "requirement"   必须满足的条件（如"必须提供发票"、"需附出差申请单"）
+  - "restriction"   禁止/限制条件（如"不得乘坐头等舱"、"仅限一线城市"）
+  - "other"         无法归入以上5类的其他规则
+
+value 只能填数字或 null：
+  - type=limit    → value 填金额数字（如 500、1000），不要带单位
+  - type=ratio    → value 填 0~1 之间的小数（如 0.8 表示80%）
+  - type=approval → value 填触发审批的金额数字（如 1000）
+  - 其他 type     → value 填 null
+  - value 绝对不是字符串！不要把"部门负责人"、"经理"等角色名填到 value
+
+scope 三个字段都用字符串或 null：
+  - role: 适用角色（如"部门负责人"、"普通员工"），没有就 null
+  - region: 适用地区（如"一线城市"），没有就 null
+  - amount_range: 金额区间（如"0-500"），没有就 null
+
+----------------------
+
 强约束规则：
 1. 不允许修改 JSON 结构
 2. 不允许新增或删除字段
@@ -54,7 +78,7 @@ POLICY_PARSE_SYSTEM_PROMPT = """你是一个企业报销政策解析器。你的
       "rules": [
         {
           "id": "",
-          "type": "limit | ratio | approval | requirement | restriction | other",
+          "type": "limit",
           "title": "",
           "scope": {
             "role": null,
@@ -89,7 +113,11 @@ class PolicyParserService:
     @property
     def model(self):
         if self._model is None:
-            self._model = get_model()
+            from app.config import settings
+            self._model = get_model(
+                timeout=settings.agent.cloud_parse_timeout_seconds,
+                max_tokens=settings.agent.cloud_parse_max_tokens,
+            )
         return self._model
 
     def parse_policy_document(self, text: str) -> dict:
@@ -167,15 +195,18 @@ class PolicyParserService:
         """
         start = time.time()
 
-        # Try the LLM parser
         try:
             result = self.parse_policy_document(pdf_text)
             policy = result.get("policy", {})
-        except Exception:
+        except Exception as e:
+            logger.exception("LLM parse_policy_document failed")
             policy = {}
-            result = {"warnings": ["LLM parsing failed"]}
+            result = {"warnings": [f"LLM 解析失败: {e}"]}
 
         doc = policy if policy and policy.get("domains") else self._default_policy().model_dump()
+        # If domains are empty but we have a non-LLM-error warning, preserve it
+        if not doc.get("domains") and not result.get("warnings"):
+            result.setdefault("warnings", []).append("LLM 返回了空结果")
         parse_time_ms = int((time.time() - start) * 1000)
 
         # Enrich each rule with AI metadata

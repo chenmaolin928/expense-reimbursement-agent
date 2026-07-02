@@ -98,7 +98,7 @@ function handleSelectRule(domainId: string, ruleId: string) {
   store.selectRule(domainId, ruleId)
 }
 
-function handleTextClick(start: number, end: number) {
+function handleTextClick(start: number, _end: number) {
   const match = store.findRuleByOffset(start)
   if (match) {
     store.selectRule(match.domainId, match.ruleId)

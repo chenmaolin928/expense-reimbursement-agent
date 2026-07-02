@@ -52,19 +52,6 @@ class PolicyPublisher:
             policy.status = PolicyStatus.PUBLISHED
             policy.current_version_id = version.id
 
-            # Write to storage backend
-            if repository:
-                repository.save_policy(policy.enterprise, version.policy_json)
-            else:
-                # Fallback: use default JSON repository if none provided
-                try:
-                    from app.services.policy_repository import PolicyRepository
-                    from app.config import settings
-                    repo = PolicyRepository(settings.policy.policies_dir)
-                    repo.save_policy(policy.enterprise, version.policy_json)
-                except Exception:
-                    pass  # Non-fatal — DB state is still correct
-
             db.commit()
 
             return {
@@ -98,7 +85,5 @@ class PolicyPublisher:
         except Exception:
             db.rollback()
             return False
-        finally:
-            db.close()
         finally:
             db.close()

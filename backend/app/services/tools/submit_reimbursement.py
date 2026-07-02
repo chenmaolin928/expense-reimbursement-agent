@@ -34,14 +34,17 @@ class SubmitReimbursementTool(BaseTool):
 
         # ---- RuleEngine validation ----
         rule_result = None
+        initial_status = ReportStatus.SUBMITTED
         if ctx.rule_engine is not None:
             rule_result = ctx.rule_engine.evaluate(category, amount)
             if not rule_result.can_submit:
                 return {"error": rule_result.reason}
             # Note: need_approval/need_guest_list/need_attachment are informational;
-            # we still allow submission but the UI can surface these flags.
+            # approval also changes the initial workflow state so the report
+            # enters the approval queue instead of silently staying submitted.
             if rule_result.need_approval:
                 note = (note + " " if note else "") + "[需审批]"
+                initial_status = ReportStatus.MANAGER_APPROVAL
             if rule_result.need_guest_list:
                 note = (note + " " if note else "") + "[需宾客名单]"
             if rule_result.need_attachment:
@@ -61,7 +64,7 @@ class SubmitReimbursementTool(BaseTool):
                 report_number=report_number,
                 employee_id=employee_id,
                 total_amount=amount,
-                status=ReportStatus.SUBMITTED,
+                status=initial_status,
                 submitted_at=datetime.utcnow(),
             )
             db.add(report)
@@ -84,7 +87,7 @@ class SubmitReimbursementTool(BaseTool):
             transition = StatusTransition(
                 report_id=report.id,
                 from_status=None,
-                to_status=ReportStatus.SUBMITTED.value,
+                to_status=initial_status.value,
                 triggered_by="cloud_agent",
                 note=note or f"AI Agent auto-submitted: {category} {amount:.2f} CNY at {vendor}",
             )
@@ -94,10 +97,14 @@ class SubmitReimbursementTool(BaseTool):
 
             result = {
                 "report_number": report_number,
-                "status": ReportStatus.SUBMITTED.value,
+                "status": initial_status.value,
                 "amount": amount,
                 "category": category,
-                "message": f"报销单 {report_number} 已提交，金额 ¥{amount:.2f}，等待审批",
+                "message": (
+                    f"报销单 {report_number} 已提交，金额 ¥{amount:.2f}，等待主管审批"
+                    if initial_status == ReportStatus.MANAGER_APPROVAL
+                    else f"报销单 {report_number} 已提交，金额 ¥{amount:.2f}，等待审批"
+                ),
             }
 
             # Attach rule engine details if available

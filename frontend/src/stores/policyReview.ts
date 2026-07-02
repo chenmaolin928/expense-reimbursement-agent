@@ -7,6 +7,7 @@ export const usePolicyReviewStore = defineStore('policyReview', () => {
   const originalText = ref('')
   const selectedRuleKey = ref<string | null>(null) // "domainId_ruleId"
   const reviews = reactive<Record<string, RuleReview>>({})
+  const ruleUpdates = reactive<Record<string, Record<string, any>>>({})
   const dirty = ref(false)
   const loading = ref(false)
   const saving = ref(false)
@@ -109,6 +110,11 @@ export const usePolicyReviewStore = defineStore('policyReview', () => {
     const r = d.rules.find(r => r.id === ruleId)
     if (!r) return
     ;(r as any)[field] = value
+    const key = `${domainId}_${ruleId}`
+    ruleUpdates[key] = {
+      ...(ruleUpdates[key] || { domain_id: domainId, rule_id: ruleId }),
+      [field]: value,
+    }
     dirty.value = true
   }
 
@@ -120,6 +126,15 @@ export const usePolicyReviewStore = defineStore('policyReview', () => {
     if (!r) return
     if (!r.scope) r.scope = { role: null, region: null, amount_range: null }
     ;(r.scope as any)[scopeField] = value
+    const key = `${domainId}_${ruleId}`
+    const existingScope = ruleUpdates[key]?.scope || {}
+    ruleUpdates[key] = {
+      ...(ruleUpdates[key] || { domain_id: domainId, rule_id: ruleId }),
+      scope: {
+        ...existingScope,
+        [scopeField]: value,
+      },
+    }
     dirty.value = true
   }
 
@@ -137,7 +152,8 @@ export const usePolicyReviewStore = defineStore('policyReview', () => {
 
       // Initialize reviews from stored data or defaults
       const storedReviews = detail.ai_draft?.reviews ?? {}
-      reviews.splice(0, Object.keys(reviews).length)
+      for (const key of Object.keys(reviews)) delete reviews[key]
+      for (const key of Object.keys(ruleUpdates)) delete ruleUpdates[key]
       // Initialize all rules
       for (const d of (detail.ai_draft?.policy_doc?.domains ?? [])) {
         for (const r of d.rules) {
@@ -163,16 +179,15 @@ export const usePolicyReviewStore = defineStore('policyReview', () => {
   async function saveAll() {
     saving.value = true
     try {
-      // Build rule_updates from any field changes — for now just save reviews
-      // Field-level tracking could be enhanced later
       const revs: Record<string, any> = {}
       for (const [k, v] of Object.entries(reviews)) {
         revs[k] = { ...v }
       }
       await policyApi.batchUpdateReview(policyId.value, versionId.value, {
         reviews: revs,
-        rule_updates: [],
+        rule_updates: Object.values(ruleUpdates),
       })
+      for (const key of Object.keys(ruleUpdates)) delete ruleUpdates[key]
       dirty.value = false
     } finally {
       saving.value = false
@@ -205,6 +220,7 @@ export const usePolicyReviewStore = defineStore('policyReview', () => {
     // Remove from local state
     const key = `${domainId}_${ruleId}`
     delete reviews[key]
+    delete ruleUpdates[key]
     if (selectedRuleKey.value === key) clearSelection()
     // Reload domains
     await loadReviewSession(policyId.value, versionId.value)

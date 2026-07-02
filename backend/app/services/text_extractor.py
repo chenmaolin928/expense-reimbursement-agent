@@ -305,11 +305,18 @@ def extract_text(
         # Raise a clear error instead of passing garbled text to the LLM.
         from fastapi import HTTPException
 
-        raise HTTPException(
-            status_code=400,
-            detail="该PDF无法提取有效文本（可能是扫描件且OCR不可用）。"
-                   "请上传带可选文本层的PDF，或粘贴文本为.txt文件。",
-        )
+        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "unknown"
+        if ext in ("pdf",):
+            detail = (
+                "该PDF无法提取有效文本（可能是扫描件且OCR不可用）。"
+                "请上传带可选文本层的PDF，或粘贴文本为.txt文件。"
+            )
+        else:
+            detail = (
+                f"无法从{ext.upper()}文件中提取有效文本。"
+                "请确保文件编码为UTF-8或GBK格式，或尝试粘贴文本内容。"
+            )
+        raise HTTPException(status_code=400, detail=detail)
 
     from fastapi import HTTPException
 

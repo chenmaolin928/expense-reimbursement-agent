@@ -53,7 +53,10 @@ class OCRSettings(BaseSettings):
 class AgentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     max_retries: int = Field(default=2, alias="agent_max_retries")
-    cloud_timeout_seconds: int = Field(default=30, alias="agent_cloud_timeout_seconds")
+    cloud_timeout_seconds: int = Field(default=60, alias="agent_cloud_timeout_seconds")
+    cloud_parse_timeout_seconds: int = Field(default=300, alias="agent_cloud_parse_timeout_seconds")
+    cloud_max_tokens: int = Field(default=4096, alias="agent_cloud_max_tokens")
+    cloud_parse_max_tokens: int = Field(default=16384, alias="agent_cloud_parse_max_tokens")
 
 
 class PIISettings(BaseSettings):

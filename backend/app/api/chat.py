@@ -163,8 +163,14 @@ def correct_search(
 
     # Re-run knowledge search with corrected fields
     from app.services.knowledge_service import KnowledgeService
-    from app.services.policy_card_service import build_policy_card, build_policy_card_out_of_scope
+    from app.services.policy_card_service import build_policy_card
     from app.services.agent_service import _synthesize_policy_judgment
+    from app.services.policy_repository import PolicyRepository
+    from app.engines.policy_engine import PolicyEngine
+    from app.engines.calculator_engine import CalculatorEngine
+    from app.engines.rule_engine import RuleEngine
+    from app.services.policy_storage_backends import DatabaseBackend
+    from app.database import SessionLocal
 
     # Build search query from corrected fields
     query_parts = []
@@ -199,7 +205,16 @@ def correct_search(
         "file_path": req.invoice_path,
     }
 
-    judgment = _synthesize_policy_judgment(invoice_result, search_results)
+    repo = PolicyRepository(DatabaseBackend(SessionLocal))
+    policy_engine = PolicyEngine(repo)
+    calculator_engine = CalculatorEngine(policy_engine)
+    rule_engine = RuleEngine(policy_engine)
+    judgment = _synthesize_policy_judgment(
+        invoice_result,
+        search_results,
+        calculator=calculator_engine,
+        rule_engine=rule_engine,
+    )
     card = build_policy_card(search_results, judgment)
 
     return card["data"]
@@ -252,8 +267,10 @@ async def chat(
     from app.engines.policy_engine import PolicyEngine
     from app.engines.calculator_engine import CalculatorEngine
     from app.engines.rule_engine import RuleEngine
+    from app.services.policy_storage_backends import DatabaseBackend
+    from app.database import SessionLocal
 
-    repo = PolicyRepository(settings.policy.policies_dir)
+    repo = PolicyRepository(DatabaseBackend(SessionLocal))
     policy_engine = PolicyEngine(repo)
     calculator_engine = CalculatorEngine(policy_engine)
     rule_engine = RuleEngine(policy_engine)

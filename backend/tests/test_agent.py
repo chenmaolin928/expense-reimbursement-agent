@@ -2,6 +2,7 @@
 
 import pytest
 from app.services.agent_service import build_agent_graph, AGENT_TOOLS, SYSTEM_PROMPT, PLAN_PROMPT
+from app.engines.rule_engine import RuleResult
 
 
 class TestAgentGraph:
@@ -36,59 +37,6 @@ class TestAgentGraph:
     def test_plan_prompt_contains_tools(self):
         assert "scan_invoice" in PLAN_PROMPT
         assert "search_knowledge" in PLAN_PROMPT
-
-
-class TestMockLLM:
-    """Verify the mock LLM generates correct tool call sequences."""
-
-    def test_policy_question_no_tools(self):
-        from app.infrastructure.llm_client import _MockChatModel
-        from langchain_core.messages import HumanMessage
-
-        model = _MockChatModel()
-        model.bind_tools(AGENT_TOOLS)
-        response = model.invoke([HumanMessage(content="公司餐补标准是多少？")])
-        assert response.content is not None
-        assert len(response.content) > 10
-        # Should NOT request tool calls for a policy question without invoice
-        assert not response.tool_calls
-
-    def test_invoice_triggers_scan(self):
-        from app.infrastructure.llm_client import _MockChatModel
-        from langchain_core.messages import HumanMessage
-
-        model = _MockChatModel()
-        model.bind_tools(AGENT_TOOLS)
-        response = model.invoke([HumanMessage(content="帮我报销这张发票 已上传文件: receipt.png")])
-        assert response.tool_calls is not None
-        assert any(tc["name"] == "scan_invoice" for tc in response.tool_calls)
-
-    def test_confirm_triggers_submit(self):
-        from app.infrastructure.llm_client import _MockChatModel
-        from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-
-        model = _MockChatModel()
-        model.bind_tools(AGENT_TOOLS)
-
-        # Simulate a full conversation: scan done, knowledge checked, user confirms
-        messages = [
-            HumanMessage(content="帮我报销 已上传文件: test.png"),
-            AIMessage(
-                content="scanning...",
-                tool_calls=[{"name": "scan_invoice", "args": {"file_path": "test.png"}, "id": "1"}],
-            ),
-            ToolMessage(content='{"vendor":"Test","amount":234.5}', name="scan_invoice", tool_call_id="1"),
-            AIMessage(
-                content="checking policy...",
-                tool_calls=[{"name": "search_knowledge", "args": {"query": "test"}, "id": "2"}],
-            ),
-            ToolMessage(content='{"total_results":1}', name="search_knowledge", tool_call_id="2"),
-            HumanMessage(content="确认，提交"),
-        ]
-        response = model.invoke(messages)
-        assert response.tool_calls is not None, "Expected tool_calls, got None"
-        assert any(tc["name"] == "submit_reimbursement" for tc in response.tool_calls), \
-            f"No submit_reimbursement in {[tc['name'] for tc in response.tool_calls]}"
 
 
 class TestTools:
@@ -130,7 +78,7 @@ class TestTools:
 
     def test_submit_reimbursement_creates_report(self):
         from app.services.tools import submit_reimbursement, set_tool_context
-        set_tool_context(employee_id=1, user_email="test@test.cn")
+        set_tool_context(employee_id=1, user_email="test@test.cn", rule_engine=None)
         result = submit_reimbursement.invoke({
             "report_id": "REQ-test-001",
             "amount": 100.0,
@@ -140,6 +88,40 @@ class TestTools:
         })
         assert "report_number" in result
         assert result["status"] == "submitted"
+
+    def test_submit_reimbursement_enters_manager_approval_when_policy_requires_it(self):
+        from app.services.tools import submit_reimbursement, set_tool_context
+
+        class FakeRuleEngine:
+            def evaluate(self, category: str, amount: float) -> RuleResult:
+                return RuleResult(
+                    can_submit=True,
+                    reason="",
+                    need_approval=True,
+                    need_guest_list=False,
+                    need_invoice=True,
+                    need_attachment=False,
+                    minimum_people=1,
+                    expense_type_name="商务招待",
+                )
+
+        set_tool_context(
+            employee_id=1,
+            user_email="test@test.cn",
+            rule_engine=FakeRuleEngine(),
+        )
+        result = submit_reimbursement.invoke({
+            "report_id": "REQ-test-approval",
+            "amount": 1500.0,
+            "category": "entertainment",
+            "vendor": "VIP Club",
+            "note": "Approval path",
+        })
+
+        assert "report_number" in result
+        assert result["status"] == "manager_approval"
+        assert "等待主管审批" in result["message"]
+        assert result["rule_check"]["need_approval"] is True
 
     def test_send_notification(self):
         from app.services.tools import send_notification, set_tool_context

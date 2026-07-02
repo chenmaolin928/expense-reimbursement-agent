@@ -19,7 +19,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 
-from app.infrastructure.llm_client import get_model, MOCK_MODE
+from app.infrastructure.llm_client import get_model
 from app.services.tools import get_all_tools, set_tool_context
 from app.services.session_agent import SessionAgentManager
 from app.services.invoice_card_service import build_invoice_card

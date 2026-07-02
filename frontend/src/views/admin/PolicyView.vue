@@ -74,17 +74,21 @@
       <!-- AI parse failure notification + re-parse button -->
       <div v-if="showReparse" class="reparse-banner">
         <p>⚠️ AI 解析失败，未提取到费用规则。</p>
+        <div v-if="versionDetail?.ai_draft?.warnings?.length" class="reparse-warnings">
+          <div v-for="w in versionDetail.ai_draft.warnings" :key="w" class="warn-item">⚠️ {{ w }}</div>
+        </div>
         <button @click="doReparse" :disabled="reparsing" class="btn-secondary btn-reparse">
           {{ reparsing ? '重新解析中...' : '🔄 重新 AI 解析' }}
         </button>
       </div>
 
+      <!-- Warnings — always show even when domains are empty -->
+      <div v-if="!showReparse && versionDetail?.ai_draft?.warnings?.length" class="warnings">
+        <div v-for="w in versionDetail.ai_draft.warnings" :key="w" class="warn-item">⚠️ {{ w }}</div>
+      </div>
+
       <!-- Draft editor — new format (domains → rules) -->
       <div v-if="usingNewFormat && versionDetail?.ai_draft?.policy_doc" class="draft-editor">
-        <div v-if="versionDetail.ai_draft.warnings?.length" class="warnings">
-          <div v-for="w in versionDetail.ai_draft.warnings" :key="w" class="warn-item">⚠️ {{ w }}</div>
-        </div>
-
         <h3 class="section-title">政策域（{{ domains.length }}）</h3>
         <div v-if="domains.length === 0" class="panel-empty">未找到政策域</div>
 
@@ -282,7 +286,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { policyApi, type PolicyListItem, type PolicyVersionItem, type PolicyVersionDetail, type PolicyDraft, type DraftExpenseType, type PolicyDomain, type PolicyRule, type PolicyDoc } from '../../api/policy'
+import { policyApi, type PolicyListItem, type PolicyVersionItem, type PolicyVersionDetail, type PolicyDraft, type DraftExpenseType, type PolicyDomain } from '../../api/policy'
 import { kbApi } from '../../api/knowledge'
 
 const router = useRouter()
@@ -327,7 +331,7 @@ const ruleCount = computed(() => domains.reduce((s: number, d: PolicyDomain) => 
 
 const hasReviewableVersion = computed(() => {
   return selectedVersionId.value && versionDetail.value?.ai_draft?.policy_doc?.domains?.length > 0
-    && versionDetail.value.status === 'draft'
+    && versionDetail.value?.status === 'draft'
 })
 
 const showReparse = computed(() => {

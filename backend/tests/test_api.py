@@ -64,7 +64,9 @@ class TestKnowledgeAPI:
         client.post("/api/v1/knowledge/bases", json={"name": "Doc KB", "description": ""}, headers=headers)
         resp = client.post(
             "/api/v1/knowledge/bases/1/documents",
-            files={"file": ("test.txt", b"Company policy: meals max 300 CNY per meal.")},
+            files={"file": ("test.txt", b"Company policy: meals max 300 CNY per meal. "
+                                      b"Travel: hotel max 500 CNY per night. "
+                                      b"Office supplies: max 2000 CNY per month.")},
             headers=headers,
         )
         assert resp.status_code == 201
@@ -75,7 +77,9 @@ class TestKnowledgeAPI:
         client.post("/api/v1/knowledge/bases", json={"name": "S KB", "description": ""}, headers=headers)
         client.post(
             "/api/v1/knowledge/bases/1/documents",
-            files={"file": ("p.txt", b"Meals allowance: breakfast 30, lunch 60, dinner 100.")},
+            files={"file": ("p.txt", b"Meals allowance: breakfast 30, lunch 60, dinner 100. "
+                                      b"Travel allowance: hotel 500 per night. "
+                                      b"Office supplies: up to 2000 per month.")},
             headers=headers,
         )
         resp = client.get("/api/v1/knowledge/search?q=meals")
@@ -168,6 +172,110 @@ class TestChatAPI:
         )
         assert resp.status_code == 200
         assert "file_path" in resp.json()
+
+    def test_correct_search_applies_rule_engine_flags(self, client, employee_token, monkeypatch):
+        import json
+        from app.api import chat as chat_api
+        from app.services.knowledge_service import KnowledgeService
+
+        # Seed a published policy in DB for DatabaseBackend
+        from app.database import SessionLocal
+        from app.infrastructure.orm import Policy, PolicyVersion
+        from app.domain.enums import PolicyStatus
+        from datetime import datetime
+
+        db = SessionLocal()
+        try:
+            policy = Policy(
+                name="Test Policy",
+                description="",
+                policy_type="expense",
+                status=PolicyStatus.PUBLISHED,
+                enterprise="default",
+                created_by=0,
+            )
+            db.add(policy)
+            db.flush()
+
+            policy_json = {
+                "doc_id": "",
+                "title": "Test Policy",
+                "version": "1.0",
+                "domains": [{
+                    "id": "entertainment",
+                    "name": "商务招待",
+                    "rules": [
+                        {
+                            "id": "ent_ratio",
+                            "type": "ratio",
+                            "title": "比例",
+                            "scope": {"role": None, "region": None, "amount_range": None},
+                            "condition": "",
+                            "value": 0.5,
+                            "unit": "percent",
+                            "raw_text": "商务招待报销比例 50%",
+                        },
+                        {
+                            "id": "ent_approval",
+                            "type": "approval",
+                            "title": "审批阈值",
+                            "scope": {"role": None, "region": None, "amount_range": None},
+                            "condition": "超过500元",
+                            "value": 500,
+                            "unit": "yuan",
+                            "raw_text": "商务招待超过500元需审批",
+                        },
+                    ],
+                }],
+            }
+            version = PolicyVersion(
+                policy_id=policy.id,
+                version_number=1,
+                status=PolicyStatus.PUBLISHED,
+                policy_json=policy_json,
+                created_by=0,
+                published_at=datetime.utcnow(),
+            )
+            db.add(version)
+            db.flush()
+            policy.current_version_id = version.id
+            db.commit()
+        finally:
+            db.close()
+
+        monkeypatch.setattr(
+            KnowledgeService,
+            "search",
+            lambda self, query, kb_id=None, top_k=5: [{
+                "chunk_id": "c1",
+                "snippet": "商务招待超过500元需审批",
+                "kb_name": "政策库",
+                "filename": "policy.pdf",
+                "score": 0.98,
+            }],
+        )
+
+        headers = {"Authorization": f"Bearer {employee_token}"}
+        r = client.post("/api/v1/chat/sessions", json={"title": "Correct Search"}, headers=headers)
+        sid = r.json()["id"]
+
+        resp = client.post(
+            f"/api/v1/chat/sessions/{sid}/correct-search",
+            json={
+                "invoice_path": "receipt.png",
+                "corrected_fields": {
+                    "category": "entertainment",
+                    "vendor": "VIP Club",
+                    "amount": 1200,
+                },
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "需主管审批" in data["summary"]
+        assert data["breakdown"]["rule_flags"]["need_approval"] is True
 
 
 class TestReimbursementAPI:

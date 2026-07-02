@@ -111,7 +111,7 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import type { PolicyRule, PolicyRuleScope } from '../api/policy'
+import type { PolicyRule } from '../api/policy'
 import { usePolicyReviewStore } from '../stores/policyReview'
 
 const props = defineProps<{

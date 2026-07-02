@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -182,19 +182,44 @@ class RuleScope(BaseModel):
     amount_range: Optional[str] = Field(None, description="Amount range, e.g. '0-500'")
 
 
+_VALID_RULE_TYPES = {"limit", "ratio", "approval", "requirement", "restriction", "other"}
+
+
 class PolicyRule(BaseModel):
     """Atomic rule unit — one condition, one effect.
 
     Rules MUST be atomic: '报销比例60%，超过500元需审批' → two PolicyRules.
     """
     id: str = Field(default="", description="Rule ID within the domain")
-    type: str = Field(default="other", pattern=r"^(limit|ratio|approval|requirement|restriction|other)$")
+    type: str = Field(default="other", description="Rule type — any value accepted, normalized on load")
     title: str = Field(default="", description="Short human-readable title")
     scope: RuleScope = Field(default_factory=RuleScope)
     condition: str = Field(default="", description="When this rule applies")
     value: Optional[float] = Field(None, description="Numeric value if applicable")
     unit: str = Field(default="", description="yuan / percent / days / times etc.")
     raw_text: str = Field(default="", description="Original text fragment this rule was extracted from")
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalize_type(cls, v: object) -> str:
+        s = str(v).strip().lower() if v else ""
+        return s if s in _VALID_RULE_TYPES else "other"
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _coerce_float(cls, v: object) -> float | None:
+        """Accept int/float/None; try to parse strings; silently discard bad strings."""
+        if v is None:
+            return None
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        if isinstance(v, str):
+            s = v.strip().replace("元", "").replace("万", "").replace("%", "").replace("％", "")
+            try:
+                return float(s)
+            except (ValueError, TypeError):
+                return None
+        return None
 
 
 class PolicyDomain(BaseModel):

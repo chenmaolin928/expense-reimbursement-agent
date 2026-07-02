@@ -50,7 +50,9 @@ router = APIRouter(prefix="/policy", tags=["policy"])
 # ---------------------------------------------------------------------------
 
 def _get_policy_repo() -> PolicyRepository:
-    return PolicyRepository(settings.policy.policies_dir)
+    from app.services.policy_storage_backends import DatabaseBackend
+    from app.database import SessionLocal
+    return PolicyRepository(DatabaseBackend(SessionLocal))
 
 
 # ---------------------------------------------------------------------------
