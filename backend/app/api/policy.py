@@ -9,7 +9,7 @@ Endpoints:
 """
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -19,9 +19,19 @@ from app.schemas.policy import (
     PolicyParseResponse,
     PolicySaveRequest,
     PolicyDocument,
+    PolicyUploadResponse,
+    PolicyDraft,
+    PolicyListItem,
+    PolicyDetail,
+    PolicyVersionItem,
+    PolicyVersionDetail,
+    UpdateDraftRequest,
+    NormalizeResponse,
+    PublishResponse,
 )
 from app.services.policy_parser_service import PolicyParserService
 from app.services.policy_repository import PolicyRepository
+from app.services.policy_service import PolicyService
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -96,6 +106,170 @@ def list_enterprises(
     return repo.list_enterprises()
 
 
+# ============================================================================
+# New Policy Center endpoints (Phase 3+4)
+# ============================================================================
+
+@router.post("/upload", response_model=PolicyUploadResponse, status_code=201)
+async def upload_policy_pdf(
+    file: UploadFile = File(...),
+    name: str = Form(default=""),
+    enterprise: str = Form(default="default"),
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Upload a PDF file -> extract text -> build KB -> AI parse -> return PolicyVersion."""
+    require_admin(auth)
+    try:
+        pdf_bytes = await file.read()
+        svc = PolicyService()
+        result = svc.create_from_pdf(
+            pdf_bytes=pdf_bytes,
+            filename=file.filename or "policy.pdf",
+            created_by=auth["user_id"],
+            enterprise=enterprise,
+            name=name,
+        )
+        return PolicyUploadResponse(**result)
+    except Exception as e:
+        logger.exception("Policy upload failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/list", response_model=list[PolicyListItem])
+def list_policies(
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """List all policies."""
+    svc = PolicyService()
+    items = svc.list_policies()
+    return [PolicyListItem(**p) for p in items]
+
+
+@router.get("/{policy_id}", response_model=PolicyDetail)
+def get_policy_detail(
+    policy_id: int,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Get policy detail."""
+    svc = PolicyService()
+    p = svc.get_policy(policy_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return PolicyDetail(**p)
+
+
+@router.get("/{policy_id}/versions", response_model=list[PolicyVersionItem])
+def list_policy_versions(
+    policy_id: int,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """List versions for a policy."""
+    svc = PolicyService()
+    versions = svc.get_versions(policy_id)
+    return [PolicyVersionItem(**v) for v in versions]
+
+
+@router.get("/{policy_id}/versions/{version_id}", response_model=PolicyVersionDetail)
+def get_version_detail(
+    policy_id: int,
+    version_id: int,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Get full version detail with ai_draft and policy_json."""
+    svc = PolicyService()
+    v = svc.get_version_detail(version_id)
+    if not v:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return PolicyVersionDetail(**v)
+
+
+@router.post("/{policy_id}/versions/{version_id}/parse")
+def reparse_version(
+    policy_id: int,
+    version_id: int,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Re-run AI parsing on a version."""
+    require_admin(auth)
+    svc = PolicyService()
+    draft = svc.trigger_ai_parse(version_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Version not found or has no PDF text")
+    return PolicyDraft(**draft)
+
+
+@router.put("/{policy_id}/versions/{version_id}/draft")
+def update_draft(
+    policy_id: int,
+    version_id: int,
+    req: UpdateDraftRequest,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Manually edit the AI draft."""
+    require_admin(auth)
+    svc = PolicyService()
+    ok = svc.update_draft(version_id, req.draft.model_dump())
+    if not ok:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {"message": "Draft updated"}
+
+
+@router.post("/{policy_id}/versions/{version_id}/normalize", response_model=NormalizeResponse)
+def normalize_version(
+    policy_id: int,
+    version_id: int,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Normalize AI draft -> policy_json."""
+    require_admin(auth)
+    svc = PolicyService()
+    result = svc.normalize_draft(version_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Version not found or has no draft")
+    return NormalizeResponse(**result)
+
+
+@router.post("/{policy_id}/versions/{version_id}/publish", response_model=PublishResponse)
+def publish_version(
+    policy_id: int,
+    version_id: int,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Publish a policy version."""
+    require_admin(auth)
+    svc = PolicyService()
+    result = svc.publish(version_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message", "Publish failed"))
+    return PublishResponse(**result)
+
+
+@router.post("/{policy_id}/versions/{version_id}/archive")
+def archive_version(
+    policy_id: int,
+    version_id: int,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Archive a policy version."""
+    require_admin(auth)
+    svc = PolicyService()
+    ok = svc.archive(version_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {"message": "Archived"}
+
+
+# ponytail: placed after numeric {policy_id} routes so FastAPI matches integers first
 @router.get("/{enterprise}", response_model=PolicyDocument)
 def get_enterprise_policy(
     enterprise: str,

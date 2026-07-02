@@ -51,3 +51,11 @@ class NotificationEvent(str, Enum):
     REJECTED = "rejected"
     PAID = "paid"
     CLARIFICATION_NEEDED = "clarification_needed"
+
+
+class PolicyStatus(str, Enum):
+    DRAFT = "draft"
+    PARSING = "parsing"
+    REVIEWING = "reviewing"
+    PUBLISHED = "published"
+    ARCHIVED = "archived"

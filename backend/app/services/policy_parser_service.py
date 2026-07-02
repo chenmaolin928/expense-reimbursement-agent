@@ -148,3 +148,67 @@ class PolicyParserService:
                                   approval_over=1000, need_guest=True, need_attachment=True),
             ],
         )
+
+    def parse_for_draft(self, pdf_text: str) -> dict:
+        """Parse PDF text and return a structured AI draft for PolicyVersion.ai_draft.
+
+        Returns a dict matching the ai_draft JSON schema:
+        {
+            "enterprise": "default",
+            "description": "...",
+            "expense_types": [{code, name, reimbursement_ratio, max_amount, ...,
+                               confidence, source_text, ai_reasoning}],
+            "warnings": [...],
+            "metadata": {model, tokens_used, parse_time_ms}
+        }
+
+        Falls back to the existing parse_policy_document() if available,
+        otherwise returns a basic draft with default expense types.
+        """
+        import time
+        start = time.time()
+
+        # Try the existing LLM parser first
+        try:
+            result = self.parse_policy_document(pdf_text)
+            policy = result.get("policy", {})
+        except Exception:
+            policy = {}
+
+        expense_types_raw = policy.get("expense_types", [])
+        if not expense_types_raw:
+            # Fallback: use default expense types
+            default_policy = self._default_policy().model_dump()
+            expense_types_raw = default_policy.get("expense_types", [])
+
+        parse_time_ms = int((time.time() - start) * 1000)
+
+        # Enrich each expense type with ai_draft fields
+        enriched_types = []
+        for et in expense_types_raw:
+            enriched_types.append({
+                "code": et.get("code", ""),
+                "name": et.get("name", ""),
+                "reimbursement_ratio": et.get("reimbursement_ratio", 0.8),
+                "max_amount": et.get("cap"),
+                "need_invoice": et.get("need_invoice", True),
+                "need_attachment": et.get("need_attachment", False),
+                "need_guest": et.get("need_guest", False),
+                "approval_over": et.get("approval_over", 0),
+                "enabled": et.get("enabled", True),
+                "confidence": 0.8 if expense_types_raw else 0.5,
+                "source_text": et.get("code", ""),
+                "ai_reasoning": f"Extracted from policy document" if expense_types_raw else "Default fallback rule",
+            })
+
+        return {
+            "enterprise": policy.get("enterprise", "default"),
+            "description": policy.get("description", "Auto-generated policy draft"),
+            "expense_types": enriched_types,
+            "warnings": result.get("warnings", []) if expense_types_raw else ["parse_policy_document returned empty, using defaults"],
+            "metadata": {
+                "model": "deepseek-chat",
+                "tokens_used": 0,
+                "parse_time_ms": parse_time_ms,
+            },
+        }

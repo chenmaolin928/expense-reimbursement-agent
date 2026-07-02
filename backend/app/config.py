@@ -69,6 +69,7 @@ class FileStorageSettings(BaseSettings):
 class PolicySettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     policies_dir: str = Field(default="./policies", alias="policy_policies_dir")
+    policy_storage_backend: str = Field(default="json", alias="policy_storage_backend")
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ from app.database import Base
 from app.domain.enums import (
     UserRole, ReportStatus, ExpenseCategory,
     DecisionStatus, ExecutionStatus, NotificationEvent,
+    PolicyStatus,
 )
 
 
@@ -92,6 +93,8 @@ class KnowledgeBase(Base):
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    policy_version_id = Column(Integer, ForeignKey("policy_versions.id"), nullable=True)
 
     documents = relationship("KnowledgeDocument", back_populates="knowledge_base")
 
@@ -185,3 +188,42 @@ class StatusTransition(Base):
     actor_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Policy(Base):
+    __tablename__ = "policies"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, default="")
+    policy_type = Column(String(50), nullable=False, default="expense")
+    current_version_id = Column(Integer, nullable=True)  # FK set after publish
+    status = Column(SAEnum(PolicyStatus), nullable=False, default=PolicyStatus.DRAFT)
+    enterprise = Column(String(100), nullable=False, default="default")
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    versions = relationship("PolicyVersion", back_populates="policy", order_by="PolicyVersion.version_number")
+
+
+class PolicyVersion(Base):
+    __tablename__ = "policy_versions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    policy_id = Column(Integer, ForeignKey("policies.id"), nullable=False)
+    version_number = Column(Integer, nullable=False)
+    pdf_filename = Column(String(255), nullable=True)
+    pdf_path = Column(String(500), nullable=True)
+    pdf_content = Column(Text, nullable=True)  # extracted text
+    kb_id = Column(Integer, ForeignKey("knowledge_bases.id"), nullable=True)
+    ai_draft = Column(JSON, nullable=True)  # AI raw parse result with confidence/source/warnings
+    policy_json = Column(JSON, nullable=True)  # final executable rules
+    ai_parse_metadata = Column(JSON, nullable=True)  # {model, tokens, parse_time_ms}
+    status = Column(SAEnum(PolicyStatus), nullable=False, default=PolicyStatus.DRAFT)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    published_at = Column(DateTime, nullable=True)
+    archived_at = Column(DateTime, nullable=True)
+
+    policy = relationship("Policy", back_populates="versions")

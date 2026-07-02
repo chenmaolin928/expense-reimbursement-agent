@@ -18,6 +18,11 @@ const router = createRouter({
       name: 'admin',
       component: () => import('../views/AdminView.vue'),
     },
+    {
+      path: '/admin/policy',
+      name: 'policy',
+      component: () => import('../views/PolicyManagementView.vue'),
+    },
     { path: '/:pathMatch(.*)*', redirect: '/login' },
   ],
 })

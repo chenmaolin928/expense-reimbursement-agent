@@ -61,3 +61,109 @@ class PolicySaveRequest(BaseModel):
     """Request to save a policy document."""
     enterprise: str = Field(default="default")
     policy: PolicyDocument
+
+
+# ---- New schemas for draft/upload flow ----
+
+class DraftExpenseType(BaseModel):
+    """Expense type with AI metadata fields for draft review."""
+    code: str
+    name: str
+    reimbursement_ratio: float = Field(default=0.8, ge=0.0, le=1.0)
+    max_amount: Optional[float] = None
+    need_invoice: bool = True
+    need_attachment: bool = False
+    need_guest: bool = False
+    approval_over: float = 0
+    enabled: bool = True
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    source_text: str = ""
+    ai_reasoning: str = ""
+
+
+class PolicyDraft(BaseModel):
+    """AI draft before normalization."""
+    enterprise: str = "default"
+    description: str = ""
+    expense_types: list[DraftExpenseType] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
+
+
+class PolicyUploadResponse(BaseModel):
+    """Response after PDF upload + AI parsing."""
+    policy_id: int
+    version_id: int
+    version_number: int
+    status: str
+    pdf_filename: str
+    kb_id: int | None = None
+    message: str
+
+
+class PolicyListItem(BaseModel):
+    """Summary row in policy list."""
+    id: int
+    name: str
+    description: str
+    policy_type: str
+    status: str
+    current_version_number: int | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class PolicyDetail(BaseModel):
+    """Full policy detail with current version info."""
+    id: int
+    name: str
+    description: str
+    policy_type: str
+    status: str
+    enterprise: str
+    current_version_id: int | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class PolicyVersionItem(BaseModel):
+    """Single version row in history."""
+    id: int
+    version_number: int
+    status: str
+    pdf_filename: str | None = None
+    kb_id: int | None = None
+    published_at: str | None = None
+    created_at: str | None = None
+
+
+class PolicyVersionDetail(BaseModel):
+    """Full version detail including draft and policy_json."""
+    id: int
+    version_number: int
+    status: str
+    pdf_filename: str | None = None
+    kb_id: int | None = None
+    ai_draft: dict | None = None
+    policy_json: dict | None = None
+    published_at: str | None = None
+    created_at: str | None = None
+
+
+class UpdateDraftRequest(BaseModel):
+    """Manual draft edit request."""
+    draft: PolicyDraft
+
+
+class NormalizeResponse(BaseModel):
+    """Result of draft -> policy_json normalization."""
+    policy_json: dict
+    warnings: list[str] = Field(default_factory=list)
+
+
+class PublishResponse(BaseModel):
+    """Result of publishing."""
+    success: bool
+    message: str
+    policy_id: int
+    version_id: int
