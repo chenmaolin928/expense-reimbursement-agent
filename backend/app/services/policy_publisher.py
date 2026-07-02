@@ -28,10 +28,10 @@ class PolicyPublisher:
             if not version.policy_json:
                 return {"success": False, "message": "Version has no policy_json — run normalize first", "policy_id": version.policy_id, "version_id": version_id}
 
-            # Validate policy_json has expense_types
+            # Validate policy_json has expense_types or domains
             pj = version.policy_json
-            if not pj.get("expense_types"):
-                return {"success": False, "message": "policy_json has no expense_types", "policy_id": version.policy_id, "version_id": version_id}
+            if not pj.get("expense_types") and not pj.get("domains"):
+                return {"success": False, "message": "policy_json has no expense_types or domains", "policy_id": version.policy_id, "version_id": version_id}
 
             policy = db.query(Policy).filter(Policy.id == version.policy_id).first()
             if not policy:
@@ -52,9 +52,18 @@ class PolicyPublisher:
             policy.status = PolicyStatus.PUBLISHED
             policy.current_version_id = version.id
 
-            # Write to storage backend if provided
+            # Write to storage backend
             if repository:
                 repository.save_policy(policy.enterprise, version.policy_json)
+            else:
+                # Fallback: use default JSON repository if none provided
+                try:
+                    from app.services.policy_repository import PolicyRepository
+                    from app.config import settings
+                    repo = PolicyRepository(settings.policy.policies_dir)
+                    repo.save_policy(policy.enterprise, version.policy_json)
+                except Exception:
+                    pass  # Non-fatal — DB state is still correct
 
             db.commit()
 

@@ -454,7 +454,7 @@ async def run_agent(
                         # Scenario A: Reimbursement flow — has invoice + policy search
                         # Emit policy_card with judgment + confirmation_request
                         judgment = _synthesize_policy_judgment(
-                            last_invoice_result, last_search_result, calculator=calculator_engine
+                            last_invoice_result, last_search_result, calculator=calculator_engine, rule_engine=rule_engine
                         )
                         card = build_policy_card(last_search_result, judgment)
                         events.append(card)
@@ -598,6 +598,7 @@ def _synthesize_policy_judgment(
     invoice_result: dict,
     search_result: dict,
     calculator: object | None = None,
+    rule_engine: object | None = None,
 ) -> dict:
     """Synthesize LLM judgment from invoice and policy search results.
 
@@ -609,7 +610,7 @@ def _synthesize_policy_judgment(
     """
     # ---- New path: CalculatorEngine ----
     if calculator is not None:
-        return _synthesize_with_calculator(invoice_result, search_result, calculator)
+        return _synthesize_with_calculator(invoice_result, search_result, calculator, rule_engine=rule_engine)
 
     # ---- Legacy path (backward compatible) ----
     return _legacy_policy_judgment(invoice_result, search_result)
@@ -619,6 +620,7 @@ def _synthesize_with_calculator(
     invoice_result: dict,
     search_result: dict,
     calculator: object,
+    rule_engine: object | None = None,
 ) -> dict:
     """Use CalculatorEngine for deterministic policy judgment."""
     category_raw = invoice_result.get("category_raw", "other")
@@ -653,6 +655,32 @@ def _synthesize_with_calculator(
     else:
         summary = f"{cat_label}在报销范围内。发票 {amount} 元，请确认是否提交报销。"
 
+    # ---- RuleEngine overlay: enrich judgment with workflow flags ----
+    rule_flags = {}
+    if rule_engine is not None:
+        try:
+            rule_result = rule_engine.evaluate(category_raw, amount)
+            rule_flags = {
+                "can_submit": rule_result.can_submit,
+                "need_approval": rule_result.need_approval,
+                "need_guest_list": rule_result.need_guest_list,
+                "need_invoice": rule_result.need_invoice,
+                "need_attachment": rule_result.need_attachment,
+            }
+            # Append approval hint to summary
+            if rule_result.need_approval:
+                summary += f" 金额超过审批阈值，需主管审批。"
+            if rule_result.need_guest_list:
+                summary += f" 需提供宾客名单。"
+            if rule_result.can_submit is False:
+                return {
+                    "verdict": "out_of_scope",
+                    "summary": rule_result.reason,
+                    "breakdown": None,
+                }
+        except Exception:
+            pass  # RuleEngine evaluation failure is non-fatal
+
     return {
         "verdict": calc.verdict,
         "summary": summary,
@@ -662,6 +690,7 @@ def _synthesize_with_calculator(
             "calculated_amount": calculated,
             "cap": cap,
             "final_amount": final_amount,
+            "rule_flags": rule_flags if rule_flags else None,
         },
     }
 

@@ -33,6 +33,7 @@ class SubmitReimbursementTool(BaseTool):
         employee_id = ctx.employee_id
 
         # ---- RuleEngine validation ----
+        rule_result = None
         if ctx.rule_engine is not None:
             rule_result = ctx.rule_engine.evaluate(category, amount)
             if not rule_result.can_submit:
@@ -91,12 +92,25 @@ class SubmitReimbursementTool(BaseTool):
 
             db.commit()
 
-            return {
+            result = {
                 "report_number": report_number,
                 "status": ReportStatus.SUBMITTED.value,
                 "amount": amount,
                 "category": category,
                 "message": f"报销单 {report_number} 已提交，金额 ¥{amount:.2f}，等待审批",
             }
+
+            # Attach rule engine details if available
+            if rule_result is not None:
+                result["rule_check"] = {
+                    "can_submit": rule_result.can_submit,
+                    "need_approval": rule_result.need_approval,
+                    "need_guest_list": rule_result.need_guest_list,
+                    "need_invoice": rule_result.need_invoice,
+                    "need_attachment": rule_result.need_attachment,
+                    "expense_type_name": rule_result.expense_type_name,
+                }
+
+            return result
         finally:
             db.close()

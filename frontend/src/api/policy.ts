@@ -64,6 +64,7 @@ export interface PolicyDraft {
   enterprise: string
   description: string
   expense_types: DraftExpenseType[]
+  policy_doc?: PolicyDoc
   warnings: string[]
   metadata: Record<string, any>
 }
@@ -83,19 +84,54 @@ export interface NormalizeResponse {
   warnings: string[]
 }
 
-export interface PublishResponse {
+export interface PolicyPublishResponse {
   success: boolean
   message: string
   policy_id: number
   version_id: number
 }
 
+// ---- New structured policy types (domains → rules) ----
+
+export interface PolicyRuleScope {
+  role: string | null
+  region: string | null
+  amount_range: string | null
+}
+
+export interface PolicyRule {
+  id: string
+  type: string
+  title: string
+  scope: PolicyRuleScope
+  condition: string
+  value: number | null
+  unit: string
+  raw_text: string
+  confidence?: number
+  ai_reasoning?: string
+}
+
+export interface PolicyDomain {
+  id: string
+  name: string
+  rules: PolicyRule[]
+}
+
+export interface PolicyDoc {
+  doc_id: string
+  title: string
+  version: string
+  domains: PolicyDomain[]
+}
+
 export const policyApi = {
-  async uploadPdf(file: File, name?: string, enterprise?: string): Promise<PolicyUploadResponse> {
+  async uploadPdf(file: File, name?: string, autoPublish?: boolean, enterprise?: string): Promise<PolicyUploadResponse> {
     const form = new FormData()
     form.append('file', file)
     if (name) form.append('name', name)
     if (enterprise) form.append('enterprise', enterprise)
+    if (autoPublish) form.append('auto_publish', 'true')
     const res = await api.post('/policy/upload', form)
     return res.data
   },

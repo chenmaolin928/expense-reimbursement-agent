@@ -19,7 +19,15 @@ class PolicyStorageBackend(ABC):
 
     @abstractmethod
     def get_expense_type(self, enterprise: str, expense_code: str) -> dict | None:
-        """Look up a single expense type by code."""
+        """Look up a single expense type by code (legacy)."""
+
+    def get_domain(self, enterprise: str, domain_name: str) -> dict | None:
+        """Look up a single domain by name (new format)."""
+        policy = self.get_policy(enterprise)
+        for domain in policy.get("domains", []):
+            if domain.get("name") == domain_name:
+                return domain
+        return None
 
     @abstractmethod
     def list_enterprises(self) -> list[str]:
@@ -54,10 +62,70 @@ class JsonFileBackend(PolicyStorageBackend):
 
     def get_expense_type(self, enterprise: str, expense_code: str) -> dict | None:
         policy = self.get_policy(enterprise)
+        # Try legacy flat format first
         for et in policy.get("expense_types", []):
             if et.get("code") == expense_code:
                 return et
+        # New format: fallback to domain matching
+        for domain in policy.get("domains", []):
+            d_name = domain.get("name", "")
+            mapping = {
+                "meals": ["餐饮", "餐饮费", "餐费"],
+                "travel": ["差旅", "差旅费", "出差"],
+                "transportation": ["交通", "交通费", "通勤"],
+                "office_supplies": ["办公用品", "办公"],
+                "entertainment": ["商务招待", "招待", "招待费"],
+            }
+            keywords = mapping.get(expense_code, [])
+            if any(kw in d_name for kw in keywords):
+                return self._domain_to_expense_type(domain, expense_code)
         return None
+
+    def get_domain(self, enterprise: str, domain_name: str) -> dict | None:
+        policy = self.get_policy(enterprise)
+        for domain in policy.get("domains", []):
+            if domain.get("name") == domain_name:
+                return domain
+        return None
+
+    @staticmethod
+    def _domain_to_expense_type(domain: dict, code: str) -> dict:
+        """Convert a domain+d rules to flat expense_type dict."""
+        name = domain.get("name", code)
+        rules = domain.get("rules", [])
+        ratio = 0.8
+        cap = None
+        approval_over = 0.0
+        need_guest = False
+        need_invoice = True
+        need_attachment = False
+        for rule in rules:
+            rtype = rule.get("type", "")
+            value = rule.get("value")
+            raw = rule.get("raw_text", "")
+            if rtype == "ratio" and value is not None:
+                ratio = float(value)
+            elif rtype == "limit" and value is not None:
+                cap = float(value)
+            elif rtype == "approval" and value is not None:
+                approval_over = float(value)
+            elif rtype == "requirement":
+                if "发票" in raw or "invoice" in raw.lower():
+                    need_invoice = True
+                if "附件" in raw or "attachment" in raw.lower():
+                    need_attachment = True
+                if "宾客" in raw or "guest" in raw.lower() or "客户" in raw:
+                    need_guest = True
+        return {
+            "code": code, "name": name,
+            "reimbursement_ratio": ratio,
+            "limit_per_person": None, "cap": cap,
+            "approval_over": approval_over,
+            "need_guest": need_guest,
+            "need_invoice": need_invoice,
+            "need_attachment": need_attachment,
+            "enabled": True,
+        }
 
     def list_enterprises(self) -> list[str]:
         enterprises = []
@@ -76,7 +144,6 @@ class DatabaseBackend(PolicyStorageBackend):
     """Read policy data from the database (PolicyVersion.policy_json)."""
 
     def __init__(self, session_factory):
-        """session_factory is a callable that returns a SQLAlchemy Session (e.g. SessionLocal)."""
         self._session_factory = session_factory
 
     def _get_published_policy(self, enterprise: str = "default") -> dict | None:
@@ -104,7 +171,6 @@ class DatabaseBackend(PolicyStorageBackend):
         return data if data is not None else {}
 
     def save_policy(self, enterprise: str, policy_data: dict) -> None:
-        # Write-through: update policy_json on current published version
         from app.infrastructure.orm import Policy, PolicyVersion
         from app.domain.enums import PolicyStatus
         session = self._session_factory()
@@ -125,9 +191,30 @@ class DatabaseBackend(PolicyStorageBackend):
 
     def get_expense_type(self, enterprise: str, expense_code: str) -> dict | None:
         policy = self.get_policy(enterprise)
+        # Legacy format
         for et in policy.get("expense_types", []):
             if et.get("code") == expense_code:
                 return et
+        # New format via domain
+        for domain in policy.get("domains", []):
+            d_name = domain.get("name", "")
+            mapping = {
+                "meals": ["餐饮", "餐饮费", "餐费"],
+                "travel": ["差旅", "差旅费", "出差"],
+                "transportation": ["交通", "交通费", "通勤"],
+                "office_supplies": ["办公用品", "办公"],
+                "entertainment": ["商务招待", "招待", "招待费"],
+            }
+            keywords = mapping.get(expense_code, [])
+            if any(kw in d_name for kw in keywords):
+                return JsonFileBackend._domain_to_expense_type(domain, expense_code)
+        return None
+
+    def get_domain(self, enterprise: str, domain_name: str) -> dict | None:
+        policy = self.get_policy(enterprise)
+        for domain in policy.get("domains", []):
+            if domain.get("name") == domain_name:
+                return domain
         return None
 
     def list_enterprises(self) -> list[str]:

@@ -26,7 +26,7 @@
 │  └─────────────────────────────────────────────────────────┘ │
 │  ┌───────────┬───────────┬──────────┬──────────┬──────────┐ │
 │  │ OCR       │ 知识库    │ 脱敏     │ 报销     │ 通知     │ │
-│  │ EasyOCR   │ ChromaDB  │ PII映射  │ 状态机   │ Email    │ │
+│  │ PaddleOCR │ ChromaDB  │ PII映射  │ 状态机   │ Email    │ │
 │  │ 真实扫描  │ 语义搜索  │ ENT-tok  │ Create   │ 模拟     │ │
 │  └─────┬─────┴─────┬─────┴────┬─────┴────┬─────┴────┬─────┘ │
 │  ┌─────▼───────────▼──────────▼──────────▼──────────▼──────┐ │
@@ -51,7 +51,7 @@
 | **SQLAlchemy 2.0 + SQLite** | ORM + 本地数据库，零配置 |
 | **ChromaDB** | 嵌入式向量数据库，知识库语义搜索 |
 | **sentence-transformers** | 本地 embedding 模型（paraphrase-multilingual-MiniLM-L12-v2，384d） |
-| **EasyOCR** | 中文发票 OCR（ch_sim + en） |
+| **PaddleOCR** | 中文发票 OCR（ch + 图像增强管线） |
 | **Pydantic v2** | 数据校验 & Schema |
 | **pydantic-settings** | 分组配置管理（App / DB / DeepSeek / KB / OCR / Agent / PII / Storage） |
 | **pytest** | 测试框架 |
@@ -82,7 +82,7 @@
 
 | 工具 | 说明 | 实现 |
 |------|------|------|
-| `scan_invoice` | OCR 扫描发票：提取金额/商户/日期/品类 | EasyOCR 真实实现，文件不存在回退 mock |
+| `scan_invoice` | OCR 扫描发票：提取金额/商户/日期/品类 | PaddleOCR 真实实现，文件不存在回退 mock |
 | `search_knowledge` | 语义搜索公司报销政策 | ChromaDB + sentence-transformers，返回相关度分数 |
 | `check_reimbursement_status` | 查询报销单审批进度 + 状态时间线 | 真实 DB 查询 status_transitions |
 | `submit_reimbursement` | 提交报销申请 | 写 ExpenseReport + ExpenseItem + 状态流转 |
@@ -211,7 +211,7 @@ python -m pytest tests/ -v
 │   │   │   ├── agent_service.py     #   ReAct Agent 图构建 + run_agent SSE 事件生成
 │   │   │   ├── session_agent.py     #   SessionAgentManager (会话级 LLM 隔离 + LRU)
 │   │   │   ├── session_service.py   #   会话 CRUD + 消息管理
-│   │   │   ├── ocr_service.py       #   EasyOCR + Mock 双模式
+│   │   │   ├── ocr_service.py       #   PaddleOCR + Mock 双模式
 │   │   │   ├── knowledge_service.py #   ChromaDB 知识库（分块/embedding/搜索）
 │   │   │   ├── reimbursement_service.py  # 报销状态机
 │   │   │   ├── desensitization_service.py # PII 脱敏 (batch/token)
@@ -273,7 +273,7 @@ python -m pytest tests/ -v
 | Phase | 内容 | 状态 |
 |-------|------|------|
 | 1 | 修复聊天消息重复 bug（values→updates + 前端 assistantStarted） | ✅ |
-| 2 | EasyOCR 真实发票扫描 + BM25 关键词搜索 | ✅ |
+| 2 | PaddleOCR 真实发票扫描 + 图像增强管线 | ✅ |
 | 3 | BaseTool 抽象基类 + 5 个工具拆分 | ✅ |
 | 4 | pydantic-settings 分组配置 + .env.example | ✅ |
 | 5 | astream_events token 级流式 + 前端 thinking 渲染 | ✅ |

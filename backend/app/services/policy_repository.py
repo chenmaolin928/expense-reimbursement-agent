@@ -23,6 +23,10 @@ class PolicyRepository:
     def get_expense_type(self, enterprise: str, expense_code: str) -> dict | None:
         return self._backend.get_expense_type(enterprise, expense_code)
 
+    def get_domain(self, enterprise: str, domain_name: str) -> dict | None:
+        """Look up a single domain by name (new format)."""
+        return self._backend.get_domain(enterprise, domain_name)
+
     def list_enterprises(self) -> list[str]:
         return self._backend.list_enterprises()
 

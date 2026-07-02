@@ -86,6 +86,7 @@ class PolicyDraft(BaseModel):
     enterprise: str = "default"
     description: str = ""
     expense_types: list[DraftExpenseType] = Field(default_factory=list)
+    policy_doc: RawPolicyDoc | None = None
     warnings: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
 
@@ -167,3 +168,45 @@ class PublishResponse(BaseModel):
     message: str
     policy_id: int
     version_id: int
+
+
+# ===========================================================================
+# New structured policy schemas (Phase 2 — domains[].rules[])
+# ===========================================================================
+
+class RuleScope(BaseModel):
+    """Rule scope conditions — only filled if explicitly stated in text."""
+    role: Optional[str] = Field(None, description="Employee role this rule applies to")
+    region: Optional[str] = Field(None, description="Geographic region")
+    amount_range: Optional[str] = Field(None, description="Amount range, e.g. '0-500'")
+
+
+class PolicyRule(BaseModel):
+    """Atomic rule unit — one condition, one effect.
+
+    Rules MUST be atomic: '报销比例60%，超过500元需审批' → two PolicyRules.
+    """
+    id: str = Field(default="", description="Rule ID within the domain")
+    type: str = Field(default="other", pattern=r"^(limit|ratio|approval|requirement|restriction|other)$")
+    title: str = Field(default="", description="Short human-readable title")
+    scope: RuleScope = Field(default_factory=RuleScope)
+    condition: str = Field(default="", description="When this rule applies")
+    value: Optional[float] = Field(None, description="Numeric value if applicable")
+    unit: str = Field(default="", description="yuan / percent / days / times etc.")
+    raw_text: str = Field(default="", description="Original text fragment this rule was extracted from")
+
+
+class PolicyDomain(BaseModel):
+    """Expense management domain — extracted from text, never predefined."""
+    id: str = Field(default="", description="Domain ID, e.g. 'D001'")
+    name: str = Field(default="", description="Domain name from原文")
+    rules: list[PolicyRule] = Field(default_factory=list)
+
+
+class RawPolicyDoc(BaseModel):
+    """LLM-parsed structured policy document — top-level structure."""
+    doc_id: str = Field(default="", description="Document identifier")
+    title: str = Field(default="", description="Document title")
+    version: str = Field(default="", description="Document version")
+    domains: list[PolicyDomain] = Field(default_factory=list)
+

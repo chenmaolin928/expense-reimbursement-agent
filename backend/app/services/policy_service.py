@@ -17,9 +17,17 @@ class PolicyService:
 
     def create_from_pdf(
         self, pdf_bytes: bytes, filename: str, created_by: int,
-        enterprise: str = "default", name: str = "",
+        enterprise: str = "default", name: str = "", auto_publish: bool = False,
     ) -> dict:
         """Full upload flow: create Policy + Version, extract PDF text, build KB, AI parse.
+
+        Args:
+            pdf_bytes: Raw file bytes.
+            filename: Original filename (used to detect type).
+            created_by: User ID of the creator.
+            enterprise: Enterprise scope.
+            name: Optional policy name.
+            auto_publish: If True, automatically normalize → publish after AI parse.
 
         Returns a dict matching PolicyUploadResponse shape.
         """
@@ -27,13 +35,19 @@ class PolicyService:
         from app.services.knowledge_builder import KnowledgeBuilder
         from app.services.policy_parser_service import PolicyParserService
 
+        # --- Extract text using shared text_extractor ---
+        from app.services.text_extractor import extract_text
+        try:
+            pdf_text, _meta = extract_text(filename, pdf_bytes)
+        except Exception as e:
+            raise RuntimeError(f"Failed to extract text from {filename}: {e}") from e
+
+        if not pdf_text or not pdf_text.strip():
+            raise ValueError(f"No text content could be extracted from {filename}")
+
         db = self._session_factory()
         try:
-            # 1. Extract PDF text (basic: try UTF-8 decode; real impl uses OCR/pdfplumber)
-            try:
-                pdf_text = pdf_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                pdf_text = pdf_bytes.decode("latin-1", errors="replace")
+            # ... 2. Create Policy ...
 
             # 2. Create Policy
             policy = Policy(
@@ -77,6 +91,26 @@ class PolicyService:
             version.sub_status = SUB_STATUS_REVIEWING
             policy.status = PolicyStatus.DRAFT
             db.commit()
+
+            # 7. Auto-publish if requested: normalize → publish
+            if auto_publish:
+                try:
+                    # normalize
+                    from app.services.rule_normalizer import RuleNormalizer
+                    normalizer = RuleNormalizer()
+                    norm_result = normalizer.normalize(draft)
+                    db.refresh(version)
+                    version.policy_json = norm_result.policy_json
+
+                    # publish
+                    from app.services.policy_publisher import PolicyPublisher
+                    publisher = PolicyPublisher(self._session_factory)
+                    pub_result = publisher.publish(version.id)
+                    if pub_result.get("success"):
+                        db.refresh(version)
+                        db.refresh(policy)
+                except Exception:
+                    pass  # Auto-publish failure is non-fatal — user can do it manually
 
             return {
                 "policy_id": policy.id,

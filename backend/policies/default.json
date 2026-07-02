@@ -1,67 +1,331 @@
 {
+  "doc_id": "",
+  "title": "默认公司报销政策",
   "version": "1.0",
-  "enterprise": "default",
-  "description": "默认企业报销政策 — 从 agent_service._extract_policy_limits() 硬编码值迁移",
-  "expense_types": [
+  "domains": [
     {
-      "code": "meals",
+      "id": "meals",
       "name": "餐饮",
-      "reimbursement_ratio": 0.6,
-      "limit_per_person": null,
-      "cap": 500,
-      "approval_over": 0,
-      "need_guest": false,
-      "need_invoice": true,
-      "need_attachment": false,
-      "enabled": true
+      "rules": [
+        {
+          "id": "meals_ratio",
+          "type": "ratio",
+          "title": "餐饮报销比例",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 0.6,
+          "unit": "percent",
+          "raw_text": "餐饮报销比例为60%"
+        },
+        {
+          "id": "meals_cap",
+          "type": "limit",
+          "title": "餐饮单次上限",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 300,
+          "unit": "yuan",
+          "raw_text": "餐饮单次报销不超过300元"
+        },
+        {
+          "id": "meals_ppl",
+          "type": "limit",
+          "title": "餐饮人均限额",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 100,
+          "unit": "yuan",
+          "raw_text": "餐饮人均不超过100元"
+        },
+        {
+          "id": "meals_approval",
+          "type": "approval",
+          "title": "餐饮审批阈值",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "超过200元",
+          "value": 200,
+          "unit": "yuan",
+          "raw_text": "餐饮超过200元需审批"
+        }
+      ]
     },
     {
-      "code": "travel",
+      "id": "travel",
       "name": "差旅",
-      "reimbursement_ratio": 0.8,
-      "limit_per_person": null,
-      "cap": 500,
-      "approval_over": 0,
-      "need_guest": false,
-      "need_invoice": true,
-      "need_attachment": false,
-      "enabled": true
+      "rules": [
+        {
+          "id": "travel_ratio",
+          "type": "ratio",
+          "title": "差旅报销比例",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 0.8,
+          "unit": "percent",
+          "raw_text": "差旅报销比例为80%"
+        },
+        {
+          "id": "travel_cap",
+          "type": "limit",
+          "title": "差旅单次上限",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 2000,
+          "unit": "yuan",
+          "raw_text": "差旅单次报销不超过2000元"
+        },
+        {
+          "id": "travel_ppl",
+          "type": "limit",
+          "title": "差旅人均限额",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 500,
+          "unit": "yuan",
+          "raw_text": "差旅人均不超过500元"
+        },
+        {
+          "id": "travel_approval",
+          "type": "approval",
+          "title": "差旅审批阈值",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "超过1000元",
+          "value": 1000,
+          "unit": "yuan",
+          "raw_text": "差旅超过1000元需审批"
+        },
+        {
+          "id": "travel_attachment",
+          "type": "requirement",
+          "title": "差旅需附件",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": null,
+          "unit": "",
+          "raw_text": "差旅需要附件"
+        }
+      ]
     },
     {
-      "code": "transportation",
+      "id": "transportation",
       "name": "交通",
-      "reimbursement_ratio": 0.8,
-      "limit_per_person": null,
-      "cap": 200,
-      "approval_over": 0,
-      "need_guest": false,
-      "need_invoice": true,
-      "need_attachment": false,
-      "enabled": true
+      "rules": [
+        {
+          "id": "trans_ratio",
+          "type": "ratio",
+          "title": "交通报销比例",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 0.7,
+          "unit": "percent",
+          "raw_text": "交通报销比例为70%"
+        },
+        {
+          "id": "trans_cap",
+          "type": "limit",
+          "title": "交通单次上限",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 500,
+          "unit": "yuan",
+          "raw_text": "交通单次报销不超过500元"
+        },
+        {
+          "id": "trans_approval",
+          "type": "approval",
+          "title": "交通审批阈值",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "超过300元",
+          "value": 300,
+          "unit": "yuan",
+          "raw_text": "交通超过300元需审批"
+        }
+      ]
     },
     {
-      "code": "office_supplies",
+      "id": "office_supplies",
       "name": "办公用品",
-      "reimbursement_ratio": 0.8,
-      "limit_per_person": null,
-      "cap": 500,
-      "approval_over": 0,
-      "need_guest": false,
-      "need_invoice": true,
-      "need_attachment": false,
-      "enabled": true
+      "rules": [
+        {
+          "id": "office_ratio",
+          "type": "ratio",
+          "title": "办公用品报销比例",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 1.0,
+          "unit": "percent",
+          "raw_text": "办公用品报销比例为100%"
+        },
+        {
+          "id": "office_cap",
+          "type": "limit",
+          "title": "办公用品单次上限",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 1000,
+          "unit": "yuan",
+          "raw_text": "办公用品单次报销不超过1000元"
+        },
+        {
+          "id": "office_approval",
+          "type": "approval",
+          "title": "办公用品审批阈值",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "超过500元",
+          "value": 500,
+          "unit": "yuan",
+          "raw_text": "办公用品超过500元需审批"
+        },
+        {
+          "id": "office_attachment",
+          "type": "requirement",
+          "title": "办公用品需附件",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": null,
+          "unit": "",
+          "raw_text": "办公用品需要附件"
+        }
+      ]
     },
     {
-      "code": "entertainment",
+      "id": "entertainment",
       "name": "商务招待",
-      "reimbursement_ratio": 0.8,
-      "limit_per_person": null,
-      "cap": 1000,
-      "approval_over": 1000,
-      "need_guest": true,
-      "need_invoice": true,
-      "need_attachment": true,
-      "enabled": true
+      "rules": [
+        {
+          "id": "ent_ratio",
+          "type": "ratio",
+          "title": "商务招待报销比例",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 0.5,
+          "unit": "percent",
+          "raw_text": "商务招待报销比例为50%"
+        },
+        {
+          "id": "ent_cap",
+          "type": "limit",
+          "title": "商务招待单次上限",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 1000,
+          "unit": "yuan",
+          "raw_text": "商务招待单次报销不超过1000元"
+        },
+        {
+          "id": "ent_ppl",
+          "type": "limit",
+          "title": "商务招待人均限额",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": 200,
+          "unit": "yuan",
+          "raw_text": "商务招待人均不超过200元"
+        },
+        {
+          "id": "ent_approval",
+          "type": "approval",
+          "title": "商务招待审批阈值",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "超过500元",
+          "value": 500,
+          "unit": "yuan",
+          "raw_text": "商务招待超过500元需审批"
+        },
+        {
+          "id": "ent_guest",
+          "type": "requirement",
+          "title": "商务招待需宾客名单",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": null,
+          "unit": "",
+          "raw_text": "商务招待需要宾客名单"
+        }
+      ]
     }
   ]
 }

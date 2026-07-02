@@ -3,9 +3,9 @@
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.api.router import api_router
 from app.config import settings
@@ -44,8 +44,23 @@ app.add_middleware(
 
 app.include_router(api_router, prefix="/api/v1")
 
-# Mount invoice files for direct URL access (thumbnail preview)
-app.mount("/api/v1/files", StaticFiles(directory=str(settings.storage.invoice_storage_path)), name="files")
+# Serve uploaded invoice/attachment files via a simple route instead of
+# StaticFiles mount, so we can handle path variations robustly.
+# URLs like /api/v1/files/filename.ext and /api/v1/files/invoices/filename.ext
+# both resolve to ./data/invoices/<basename>.
+@app.get("/api/v1/files/{filename:path}")
+def serve_invoice_file(filename: str):
+    """Serve uploaded invoice/attachment files.
+
+    Extracts just the base filename so paths like
+    ``invoices/abc.jpg``, ``data/invoices/abc.jpg``,
+    or ``abc.jpg`` all resolve to ``./data/invoices/abc.jpg``.
+    """
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(settings.storage.invoice_storage_path, safe_name)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"文件不存在: {safe_name}")
+    return FileResponse(file_path)
 
 
 @app.get("/")

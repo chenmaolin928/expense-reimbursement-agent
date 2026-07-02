@@ -1,54 +1,87 @@
 """Policy Parser Service — AI-powered natural language → structured JSON.
 
-Calls the LLM to extract structured expense type rules from free-text policy documents.
+Calls the LLM to extract structured policy rules from free-text policy documents.
+Output format: RawPolicyDoc (domains[].rules[]).
 """
 
 import json
 import logging
+import re
+import time
 
 from app.infrastructure.llm_client import get_model
-from app.schemas.policy import PolicyDocument, PolicyExpenseType
+from app.schemas.policy import (
+    PolicyDocument,
+    PolicyExpenseType,
+    RuleScope,
+    PolicyRule,
+    PolicyDomain,
+    RawPolicyDoc,
+)
 
 logger = logging.getLogger(__name__)
 
-POLICY_PARSE_SYSTEM_PROMPT = """你是一个企业报销政策解析器。你的任务是从给定的政策文本中提取结构化的报销规则。
+# ---------------------------------------------------------------------------
+# New LLM Prompt — structured extraction (domains → rules)
+# ---------------------------------------------------------------------------
 
-请严格按照以下 JSON Schema 输出，不要输出任何其他内容：
+POLICY_PARSE_SYSTEM_PROMPT = """你是一个企业报销政策解析器。你的任务是将输入的企业报销制度文本转换为严格固定结构的 JSON 数据。
 
-```json
+----------------------
+
+强约束规则：
+1. 不允许修改 JSON 结构
+2. 不允许新增或删除字段
+3. 不允许使用预定义费用分类
+4. 所有分类（domains）必须从原文自动归纳
+5. 不允许常识补全或猜测数据
+6. 未明确字段必须填 null
+7. 每条规则必须保留原文片段 raw_text
+8. 规则必须拆分为最小原子单元，不允许合并
+
+----------------------
+
+输出结构必须严格如下：
+
 {
-  "version": "1.0",
-  "enterprise": "default",
-  "description": "政策摘要",
-  "expense_types": [
+  "doc_id": "",
+  "title": "",
+  "version": "",
+  "domains": [
     {
-      "code": "费用类型代码（英文）",
-      "name": "费用类型名称（中文）",
-      "reimbursement_ratio": 报销比例(0.0-1.0),
-      "limit_per_person": 人均限额(null表示无),
-      "cap": 单次报销金额上限(null表示无),
-      "approval_over": 超过此金额需审批(0=不需要),
-      "need_guest": 是否需要宾客名单(true/false),
-      "need_invoice": 是否需要发票(true/false),
-      "need_attachment": 是否需要附件(true/false),
-      "enabled": 是否启用(true)
+      "id": "",
+      "name": "",
+      "rules": [
+        {
+          "id": "",
+          "type": "limit | ratio | approval | requirement | restriction | other",
+          "title": "",
+          "scope": {
+            "role": null,
+            "region": null,
+            "amount_range": null
+          },
+          "condition": "",
+          "value": null,
+          "unit": "",
+          "raw_text": ""
+        }
+      ]
     }
   ]
 }
-```
 
-**重要规则：**
-1. 费用类型 code 必须使用英文：meals, travel, transportation, office_supplies, entertainment
-2. 如果文本中提到两种以上费用类型，全部提取
-3. 如果文本中没有明确的数字，使用合理默认值（餐饮60%，其他80%）
-4. 商务招待(entertainment) 默认 need_guest=true, need_attachment=true, approval_over=1000
-5. 如果某字段文本中未提及，根据费用类型常识填充
+----------------------
 
-只输出 JSON，不要输出其他内容。"""
+输出要求：
+- 只输出 JSON
+- 不要任何解释
+- 不要任何额外文本
+- 必须严格符合结构"""
 
 
 class PolicyParserService:
-    """Parse natural-language policy text into structured PolicyDocument via LLM."""
+    """Parse natural-language policy text into structured RawPolicyDoc via LLM."""
 
     def __init__(self):
         self._model = None
@@ -63,7 +96,7 @@ class PolicyParserService:
         """Call LLM to extract structured policy from free text.
 
         Returns:
-            dict with keys: policy (PolicyDocument), warnings (list[str]),
+            dict with keys: policy (RawPolicyDoc dict), warnings (list[str]),
             raw_llm_output (str|None)
         """
         from langchain_core.messages import SystemMessage, HumanMessage
@@ -79,19 +112,17 @@ class PolicyParserService:
         # Extract JSON from potential markdown fences
         json_str = raw_output
         if json_str.startswith("```"):
-            import re
             json_str = re.sub(r"^```\w*\n?", "", json_str)
             json_str = re.sub(r"\n?```$", "", json_str)
 
         warnings: list[str] = []
-        policy: PolicyDocument | None = None
+        policy: RawPolicyDoc | None = None
 
         try:
             data = json.loads(json_str)
-            policy = self.validate_parsed_policy(data)
+            policy = RawPolicyDoc(**data)
         except (json.JSONDecodeError, ValueError) as e:
             warnings.append(f"JSON 解析失败: {e}")
-            # Fallback: return default policy
             policy = self._default_policy()
             warnings.append("已回退到默认政策")
 
@@ -101,114 +132,177 @@ class PolicyParserService:
             "raw_llm_output": raw_output,
         }
 
-    def validate_parsed_policy(self, data: dict) -> PolicyDocument:
-        """Validate and normalize parsed policy data into PolicyDocument."""
-        result: list[str] = []
-
-        expense_types = []
-        for item in data.get("expense_types", []):
-            # Ensure required fields have defaults
-            item.setdefault("reimbursement_ratio", 0.8)
-            item.setdefault("cap", None)
-            item.setdefault("limit_per_person", None)
-            item.setdefault("approval_over", 0)
-            item.setdefault("need_guest", False)
-            item.setdefault("need_invoice", True)
-            item.setdefault("need_attachment", False)
-            item.setdefault("enabled", True)
-
-            # Validate ratio range
-            ratio = item.get("reimbursement_ratio", 0.8)
-            if not (0.0 <= ratio <= 1.0):
-                result.append(f"{item.get('code')}: reimbursement_ratio {ratio} 超出范围，已调整")
-                item["reimbursement_ratio"] = max(0.0, min(1.0, ratio))
-
-            expense_types.append(PolicyExpenseType(**item))
-
-        return PolicyDocument(
-            version=data.get("version", "1.0"),
-            enterprise=data.get("enterprise", "default"),
-            description=data.get("description", ""),
-            expense_types=expense_types,
-        )
-
     @staticmethod
-    def _default_policy() -> PolicyDocument:
-        """Return a minimal default policy when parsing fails."""
-        return PolicyDocument(
-            version="1.0",
-            enterprise="default",
-            description="Default fallback policy",
-            expense_types=[
-                PolicyExpenseType(code="meals", name="餐饮", reimbursement_ratio=0.6, cap=500),
-                PolicyExpenseType(code="travel", name="差旅", reimbursement_ratio=0.8, cap=500),
-                PolicyExpenseType(code="transportation", name="交通", reimbursement_ratio=0.8, cap=200),
-                PolicyExpenseType(code="office_supplies", name="办公用品", reimbursement_ratio=0.8, cap=500),
-                PolicyExpenseType(code="entertainment", name="商务招待", reimbursement_ratio=0.8, cap=1000,
-                                  approval_over=1000, need_guest=True, need_attachment=True),
-            ],
+    def _default_policy() -> RawPolicyDoc:
+        """Return a minimal default when parsing fails."""
+        return RawPolicyDoc(
+            doc_id="",
+            title="Default policy",
+            version="",
+            domains=[],
         )
+
+    # ------------------------------------------------------------------
+    # New-format parse_for_draft — returns domains[].rules[]
+    # ------------------------------------------------------------------
 
     def parse_for_draft(self, pdf_text: str) -> dict:
         """Parse PDF text and return a structured AI draft for PolicyVersion.ai_draft.
 
-        Returns a dict matching the ai_draft JSON schema:
+        Returns a dict matching the new ai_draft JSON schema:
         {
-            "enterprise": "default",
-            "description": "...",
-            "expense_types": [{code, name, reimbursement_ratio, max_amount, ...,
-                               confidence, source_text, ai_reasoning}],
+            "policy_doc": {
+                "doc_id": "...",
+                "title": "...",
+                "version": "...",
+                "domains": [{
+                    "id": "...", "name": "...",
+                    "rules": [{id, type, title, scope, condition, value, unit, raw_text,
+                               confidence, ai_reasoning}, ...]
+                }]
+            },
             "warnings": [...],
             "metadata": {model, tokens_used, parse_time_ms}
         }
-
-        Falls back to the existing parse_policy_document() if available,
-        otherwise returns a basic draft with default expense types.
         """
-        import time
         start = time.time()
 
-        # Try the existing LLM parser first
+        # Try the LLM parser
         try:
             result = self.parse_policy_document(pdf_text)
             policy = result.get("policy", {})
         except Exception:
             policy = {}
+            result = {"warnings": ["LLM parsing failed"]}
 
-        expense_types_raw = policy.get("expense_types", [])
-        if not expense_types_raw:
-            # Fallback: use default expense types
-            default_policy = self._default_policy().model_dump()
-            expense_types_raw = default_policy.get("expense_types", [])
-
+        doc = policy if policy and policy.get("domains") else self._default_policy().model_dump()
         parse_time_ms = int((time.time() - start) * 1000)
 
-        # Enrich each expense type with ai_draft fields
-        enriched_types = []
-        for et in expense_types_raw:
-            enriched_types.append({
-                "code": et.get("code", ""),
-                "name": et.get("name", ""),
-                "reimbursement_ratio": et.get("reimbursement_ratio", 0.8),
-                "max_amount": et.get("cap"),
-                "need_invoice": et.get("need_invoice", True),
-                "need_attachment": et.get("need_attachment", False),
-                "need_guest": et.get("need_guest", False),
-                "approval_over": et.get("approval_over", 0),
-                "enabled": et.get("enabled", True),
-                "confidence": 0.8 if expense_types_raw else 0.5,
-                "source_text": et.get("code", ""),
-                "ai_reasoning": f"Extracted from policy document" if expense_types_raw else "Default fallback rule",
-            })
+        # Enrich each rule with AI metadata
+        domains_data = []
+        for domain in doc.get("domains", []):
+            enriched_rules = []
+            for rule in domain.get("rules", []):
+                enriched_rules.append({
+                    **rule,
+                    "confidence": 0.8,
+                    "ai_reasoning": "Extracted from policy document",
+                })
+            domains_data.append({**domain, "rules": enriched_rules})
+
+        policy_doc = {
+            "doc_id": doc.get("doc_id", ""),
+            "title": doc.get("title", ""),
+            "version": doc.get("version", ""),
+            "domains": domains_data,
+        }
 
         return {
-            "enterprise": policy.get("enterprise", "default"),
-            "description": policy.get("description", "Auto-generated policy draft"),
-            "expense_types": enriched_types,
-            "warnings": result.get("warnings", []) if expense_types_raw else ["parse_policy_document returned empty, using defaults"],
+            "policy_doc": policy_doc,
+            "warnings": result.get("warnings", []),
             "metadata": {
                 "model": "deepseek-chat",
                 "tokens_used": 0,
                 "parse_time_ms": parse_time_ms,
             },
         }
+
+    # ------------------------------------------------------------------
+    # Legacy: old flat expense_type parsing (keep for backward compat)
+    # ------------------------------------------------------------------
+
+    def parse_flat_policy_document(self, text: str) -> dict:
+        """Same as parse_policy_document but returns old flat PolicyDocument format.
+
+        Used by the /policy/parse endpoint for backward compatibility.
+        """
+        result = self.parse_policy_document(text)
+        raw_doc = result.get("policy", {})
+
+        # Convert new format → old flat expense_types
+        expense_types = []
+        for domain in raw_doc.get("domains", []):
+            name = domain.get("name", "")
+            code = self._domain_name_to_code(name, domain.get("id", ""))
+            rules = domain.get("rules", [])
+
+            ratio = 0.8
+            cap = None
+            approval_over = 0.0
+            need_guest = False
+            need_invoice = True
+            need_attachment = False
+
+            for rule in rules:
+                rtype = rule.get("type", "")
+                value = rule.get("value")
+                raw = rule.get("raw_text", "")
+
+                if rtype == "ratio" and value is not None:
+                    ratio = value
+                elif rtype == "limit" and value is not None:
+                    cap = value
+                elif rtype == "approval" and value is not None:
+                    approval_over = value
+                elif rtype == "requirement":
+                    if "发票" in raw or "invoice" in raw.lower():
+                        need_invoice = True
+                    if "附件" in raw or "attachment" in raw.lower():
+                        need_attachment = True
+                    if "宾客" in raw or "guest" in raw.lower() or "客户" in raw:
+                        need_guest = True
+
+            expense_types.append({
+                "code": code,
+                "name": name,
+                "reimbursement_ratio": ratio,
+                "limit_per_person": None,
+                "cap": cap,
+                "approval_over": approval_over,
+                "need_guest": need_guest,
+                "need_invoice": need_invoice,
+                "need_attachment": need_attachment,
+                "enabled": True,
+            })
+
+        flat = {
+            "version": raw_doc.get("version", "1.0"),
+            "enterprise": "default",
+            "description": raw_doc.get("title", ""),
+            "expense_types": expense_types,
+        }
+
+        try:
+            flat_doc = PolicyDocument(**flat)
+        except Exception as e:
+            warnings = result.get("warnings", []) + [f"Flat conversion warning: {e}"]
+            flat_doc = PolicyDocument(
+                version="1.0", enterprise="default", description="Parsing failed",
+                expense_types=[],
+            )
+            return {
+                "policy": flat_doc.model_dump(),
+                "warnings": warnings,
+                "raw_llm_output": result.get("raw_llm_output"),
+            }
+
+        return {
+            "policy": flat_doc.model_dump(),
+            "warnings": result.get("warnings", []),
+            "raw_llm_output": result.get("raw_llm_output"),
+        }
+
+    @staticmethod
+    def _domain_name_to_code(name: str, domain_id: str) -> str:
+        """Map domain name to a code for backward-compatible flat conversion."""
+        mapping = {
+            "餐饮": "meals", "餐饮费": "meals", "餐费": "meals",
+            "差旅": "travel", "差旅费": "travel", "出差": "travel",
+            "交通": "transportation", "交通费": "transportation", "通勤": "transportation",
+            "办公用品": "office_supplies", "办公": "office_supplies",
+            "商务招待": "entertainment", "招待": "entertainment", "招待费": "entertainment",
+        }
+        for key, code in mapping.items():
+            if key in name:
+                return code
+        return domain_id.lower().replace(" ", "_") if domain_id else "other"

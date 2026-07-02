@@ -14,6 +14,10 @@
       </div>
     </aside>
     <main class="content">
+      <div v-if="isKnowledgePage" class="kb-hint">
+        💡 上传政策文档并自动生成报销规则？前往
+        <router-link to="/admin/policy" class="kb-hint-link">📋 政策中心</router-link>
+      </div>
       <router-view />
     </main>
   </div>
@@ -21,15 +25,18 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 
 const router = useRouter()
+const route = useRoute()
 const auth = useAuthStore()
 
 const showDebug = computed(() => {
   return import.meta.env.DEV || new URLSearchParams(window.location.search).has('dev')
 })
+
+const isKnowledgePage = computed(() => route.path === '/admin/knowledge')
 
 function handleLogout() {
   auth.logout()
@@ -107,4 +114,20 @@ function handleLogout() {
   overflow-y: auto;
   background: #0a0a0e;
 }
+
+.kb-hint {
+  margin: 12px 32px 0;
+  padding: 10px 16px;
+  background: rgba(99,102,241,0.06);
+  border: 1px solid rgba(99,102,241,0.12);
+  border-radius: 10px;
+  font-size: 13px;
+  color: rgba(255,255,255,0.45);
+}
+.kb-hint-link {
+  color: #a5b4fc;
+  font-weight: 600;
+  text-decoration: none;
+}
+.kb-hint-link:hover { text-decoration: underline; }
 </style>

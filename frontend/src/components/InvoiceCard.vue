@@ -17,6 +17,11 @@ const props = defineProps<{
 }>()
 
 const showDetail = ref(false)
+const imgError = ref(false)
+
+function onImageError() {
+  imgError.value = true
+}
 
 function getFileUrl(filePath: string): string {
   const name = filePath.split('/').pop() || filePath.split('\\').pop() || filePath
@@ -73,11 +78,19 @@ function handleCorrect() {
       </div>
       <div class="header-right">
         <img
-          v-if="data.invoice_path && isImagePath(data.invoice_path)"
+          v-if="data.invoice_path && isImagePath(data.invoice_path) && !imgError"
           :src="getFileUrl(data.invoice_path)"
           class="invoice-thumb"
           @click="openImage(getFileUrl(data.invoice_path))"
+          @error="onImageError"
         />
+        <div v-else-if="data.invoice_path && isImagePath(data.invoice_path)" class="invoice-thumb invoice-thumb-fallback">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
+          </svg>
+        </div>
         <button class="detail-toggle" @click="showDetail = !showDetail">
           {{ showDetail ? '收起' : '查看详情' }}
         </button>
@@ -164,6 +177,12 @@ function handleCorrect() {
   transition: transform 0.15s;
 }
 .invoice-thumb:hover { transform: scale(1.1); }
+.invoice-thumb-fallback {
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.04);
+  cursor: default;
+}
+.invoice-thumb-fallback svg { width: 18px; height: 18px; color: rgba(255,255,255,0.2); }
 .detail-toggle {
   background: none; border: none; color: #818cf8; font-size: 12px;
   cursor: pointer; padding: 4px 8px; border-radius: 6px;

@@ -59,10 +59,12 @@ def parse_policy(
     auth: dict = Depends(_parse_auth_header),
     db: Session = Depends(get_db),
 ):
-    """AI-powered: parse natural-language policy text into structured JSON."""
+    """AI-powered: parse natural-language policy text into structured JSON.
+    Returns old flat format (PolicyDocument) for backward compatibility.
+    """
     require_admin(auth)
     parser = PolicyParserService()
-    result = parser.parse_policy_document(req.text)
+    result = parser.parse_flat_policy_document(req.text)
     return PolicyParseResponse(
         policy=PolicyDocument(**result["policy"]),
         warnings=result.get("warnings", []),
@@ -117,10 +119,14 @@ async def upload_policy_pdf(
     file: UploadFile = File(...),
     name: str = Form(default=""),
     enterprise: str = Form(default="default"),
+    auto_publish: bool = Form(default=False),
     auth: dict = Depends(_parse_auth_header),
     db: Session = Depends(get_db),
 ):
-    """Upload a PDF file -> extract text -> build KB -> AI parse -> return PolicyVersion."""
+    """Upload a PDF/DOCX/TXT file -> extract text -> build KB -> AI parse -> return PolicyVersion.
+
+    If auto_publish is true, also normalize and publish the policy in one step.
+    """
     require_admin(auth)
     try:
         pdf_bytes = await file.read()
@@ -131,6 +137,7 @@ async def upload_policy_pdf(
             created_by=auth["user_id"],
             enterprise=enterprise,
             name=name,
+            auto_publish=auto_publish,
         )
         return PolicyUploadResponse(**result)
     except Exception as e:

@@ -132,6 +132,16 @@ class PolicyLifecycleService:
             policy.status = PolicyStatus.PUBLISHED
             policy.current_version_id = version.id
 
+            # Write published policy_json to file storage so RuleEngine can read it
+            if version.policy_json:
+                try:
+                    from app.services.policy_repository import PolicyRepository
+                    from app.config import settings
+                    repo = PolicyRepository(settings.policy.policies_dir)
+                    repo.save_policy(policy.enterprise, version.policy_json)
+                except Exception:
+                    logger.warning("Failed to write activated policy to file storage", exc_info=True)
+
         trans = self._record_transition(
             entity_type="policy_version",
             entity_id=str(version.id),

@@ -46,9 +46,12 @@ class RuleEngine:
         expense_type = self._policy.get_expense_type(expense_code, enterprise)
 
         if not expense_type:
+            # List available expense types for better error message
+            all_types = self._policy.get_all_expense_types(enterprise)
+            available = ", ".join(et.get("code", "?") for et in all_types) if all_types else "(无已发布规则)"
             return RuleResult(
                 can_submit=False,
-                reason=f"费用类型 '{expense_code}' 不在公司报销范围内",
+                reason=f"费用类型 '{expense_code}' 不在公司报销范围内。可用类型: {available}",
                 need_approval=False,
                 need_guest_list=False,
                 need_invoice=False,

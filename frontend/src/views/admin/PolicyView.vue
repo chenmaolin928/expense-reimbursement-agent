@@ -28,10 +28,13 @@
       <p class="upload-desc">上传公司报销政策文档，AI 将解析为结构化的费用规则并构建可搜索的知识库。</p>
       <div class="upload-row">
         <label class="btn-primary file-label">
-          选择 PDF
-          <input type="file" accept=".pdf" @change="handleUpload" hidden />
+          选择文件
+          <input type="file" accept=".pdf,.docx,.txt" @change="handleUpload" hidden />
         </label>
         <input v-model="newPolicyName" placeholder="政策名称（可选）" class="input-dark" />
+        <label class="checkbox-label auto-publish-check">
+          <input v-model="autoPublish" type="checkbox" /> 自动发布
+        </label>
       </div>
       <p v-if="uploading" class="upload-status">上传 & 解析中...</p>
 
@@ -46,12 +49,7 @@
         <div class="summary-row">
           <span class="summary-icon">🤖</span>
           <span class="summary-label">AI Parsed
-            <span class="summary-detail">
-              {{ draftExpenseTypes.length }} expense types
-              <template v-if="draftExpenseTypes.filter(e => e.confidence < 0.7).length">
-                · {{ draftExpenseTypes.filter(e => e.confidence < 0.7).length }} need review
-              </template>
-            </span>
+            <span class="summary-detail">{{ domainCount }} domains / {{ ruleCount }} rules</span>
           </span>
         </div>
       </div>
@@ -69,16 +67,86 @@
         </button>
       </div>
 
-      <!-- Draft editor -->
-      <div v-if="versionDetail?.ai_draft" class="draft-editor">
+      <!-- Draft editor — new format (domains → rules) -->
+      <div v-if="usingNewFormat && versionDetail?.ai_draft?.policy_doc" class="draft-editor">
         <div v-if="versionDetail.ai_draft.warnings?.length" class="warnings">
           <div v-for="w in versionDetail.ai_draft.warnings" :key="w" class="warn-item">⚠️ {{ w }}</div>
         </div>
 
-        <h3 class="section-title">费用类型（{{ draftExpenseTypes.length }}）</h3>
-        <div v-if="draftExpenseTypes.length === 0" class="panel-empty">未找到费用类型</div>
+        <h3 class="section-title">政策域（{{ domains.length }}）</h3>
+        <div v-if="domains.length === 0" class="panel-empty">未找到政策域</div>
 
-        <div v-for="(et, i) in draftExpenseTypes" :key="et.code || i" class="expense-card">
+        <div v-for="(domain, di) in domains" :key="domain.id || di" class="domain-card">
+          <div class="domain-header">
+            <span class="domain-name">{{ domain.name }}</span>
+            <span class="domain-id">ID: {{ domain.id }}</span>
+            <span class="domain-rule-count">{{ domain.rules.length }} 条规则</span>
+          </div>
+
+          <div v-for="(rule, ri) in domain.rules" :key="rule.id || ri" class="rule-card">
+            <div class="rule-type-badge" :class="'rule-type-' + rule.type">{{ rule.type }}</div>
+            <div class="rule-body">
+              <div class="rule-title">{{ rule.title }}</div>
+              <div class="rule-details">
+                <span v-if="rule.value !== null && rule.value !== undefined" class="rule-detail">
+                  值: <strong>{{ rule.value }} {{ rule.unit }}</strong>
+                </span>
+                <span v-if="rule.condition" class="rule-detail">
+                  条件: {{ rule.condition }}
+                </span>
+                <span v-if="rule.scope?.role" class="rule-detail">
+                  职级: {{ rule.scope.role }}
+                </span>
+                <span v-if="rule.scope?.region" class="rule-detail">
+                  地区: {{ rule.scope.region }}
+                </span>
+                <span v-if="rule.scope?.amount_range" class="rule-detail">
+                  金额范围: {{ rule.scope.amount_range }}
+                </span>
+              </div>
+              <div class="rule-raw" v-if="rule.raw_text">
+                <span class="raw-label">原文:</span> {{ rule.raw_text }}
+              </div>
+              <div class="rule-meta" v-if="rule.confidence !== undefined">
+                <span :class="['rule-confidence', confColor(rule.confidence)]">
+                  置信度: {{ (rule.confidence * 100).toFixed(0) }}%
+                </span>
+              </div>
+            </div>
+
+            <!-- Edit fields for each rule -->
+            <div class="rule-edit-fields">
+              <label class="field">值
+                <input v-model.number="rule.value" type="number" class="input-dark field-input" />
+              </label>
+              <label class="field">条件
+                <input v-model="rule.condition" class="input-dark field-input" />
+              </label>
+              <label class="field">单位
+                <input v-model="rule.unit" class="input-dark field-input" />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="editor-actions">
+          <button @click="saveDraft" class="btn-primary">保存草稿</button>
+          <button @click="doNormalize" :disabled="normalizing" class="btn-secondary">
+            {{ normalizing ? '规范化中...' : '规范化 → Policy JSON' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Draft editor — legacy format (expense_types) -->
+      <div v-if="!usingNewFormat && versionDetail?.ai_draft?.expense_types" class="draft-editor">
+        <div v-if="versionDetail.ai_draft.warnings?.length" class="warnings">
+          <div v-for="w in versionDetail.ai_draft.warnings" :key="w" class="warn-item">⚠️ {{ w }}</div>
+        </div>
+
+        <h3 class="section-title">费用类型（{{ legacyExpenseTypes.length }}）</h3>
+        <div v-if="legacyExpenseTypes.length === 0" class="panel-empty">未找到费用类型</div>
+
+        <div v-for="(et, i) in legacyExpenseTypes" :key="et.code || i" class="expense-card">
           <div class="card-header">
             <span class="card-name">{{ et.name }} <code class="card-code">{{ et.code }}</code></span>
             <span :class="['confidence', confColor(et.confidence)]">{{ (et.confidence * 100).toFixed(0) }}%</span>
@@ -170,7 +238,7 @@
             <span class="kb-doc-name">📄 {{ doc.filename }}</span>
             <span class="kb-doc-meta">{{ doc.chunk_count }} chunks</span>
           </div>
-          <div v-if="expandedDocs.has(doc.id) && chunkDetails.has(doc.id)" class="kb-doc-chunks">
+          <div v-if="expandedDocs.has(doc.id) && chunkDetails.get(doc.id)" class="kb-doc-chunks">
             <div v-for="c in (chunkDetails.get(doc.id) || [])" :key="c.index" class="kb-chunk-item">
               <span class="cidx">#{{ c.index }}</span>
               <span class="ctext">{{ c.text }}</span>
@@ -200,8 +268,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
-import { policyApi, type PolicyListItem, type PolicyVersionItem, type PolicyVersionDetail, type PolicyDraft, type DraftExpenseType } from '../../api/policy'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { policyApi, type PolicyListItem, type PolicyVersionItem, type PolicyVersionDetail, type PolicyDraft, type DraftExpenseType, type PolicyDomain, type PolicyRule, type PolicyDoc } from '../../api/policy'
 import { kbApi } from '../../api/knowledge'
 
 const policies = ref<PolicyListItem[]>([])
@@ -213,12 +281,18 @@ const uploading = ref(false)
 const normalizing = ref(false)
 const publishing = ref(false)
 const activating = ref(false)
-const draftExpenseTypes = reactive<DraftExpenseType[]>([])
+
+// New format state
+const domains = reactive<PolicyDomain[]>([])
+// Legacy format state
+const legacyExpenseTypes = reactive<DraftExpenseType[]>([])
+
 const newPolicyName = ref('')
 const errorMsg = ref('')
 const showUpload = ref(true)
 const loading = ref(false)
 const uploadSummary = ref<{ kb_id: number | null; policy_name: string; version_number: number } | null>(null)
+const autoPublish = ref(false)
 
 const currentKbInfo = ref<any>(null)
 const currentKbDocs = ref<any[]>([])
@@ -228,12 +302,19 @@ const kbSearching = ref(false)
 const expandedDocs = ref<Set<number>>(new Set())
 const chunkDetails = ref<Map<number, any[]>>(new Map())
 
+const usingNewFormat = computed(() => {
+  return versionDetail.value?.ai_draft?.policy_doc?.domains?.length > 0
+})
+
+const domainCount = computed(() => domains.length)
+const ruleCount = computed(() => domains.reduce((s: number, d: PolicyDomain) => s + d.rules.length, 0))
+
 onMounted(loadPolicies)
 
-async function loadPolicies() {
+function loadPolicies() {
   loading.value = true
-  try { policies.value = await policyApi.list() } catch { errorMsg.value = 'Failed to load policies' }
-  finally { loading.value = false }
+  policyApi.list().then(r => policies.value = r).catch(() => errorMsg.value = 'Failed to load policies')
+    .finally(() => loading.value = false)
 }
 
 function startNew() {
@@ -241,71 +322,85 @@ function startNew() {
   selectedVersionId.value = null
   versionDetail.value = null
   versions.value = []
-  draftExpenseTypes.length = 0
+  domains.length = 0
+  legacyExpenseTypes.length = 0
   showUpload.value = true
   errorMsg.value = ''
   uploadSummary.value = null
   clearCurrentKb()
 }
 
-async function selectPolicy(id: number) {
+function selectPolicy(id: number) {
   selectedPolicyId.value = id
   selectedVersionId.value = null
   versionDetail.value = null
-  draftExpenseTypes.length = 0
+  domains.length = 0
+  legacyExpenseTypes.length = 0
   showUpload.value = false
   errorMsg.value = ''
   uploadSummary.value = null
   clearCurrentKb()
-  try { versions.value = await policyApi.listVersions(id) } catch { versions.value = [] }
+  policyApi.listVersions(id).then(r => versions.value = r).catch(() => versions.value = [])
 }
 
-async function selectVersion(versionId: number) {
+function selectVersion(versionId: number) {
   if (!selectedPolicyId.value) return
   selectedVersionId.value = versionId
   errorMsg.value = ''
   clearCurrentKb()
-  try {
-    versionDetail.value = await policyApi.getVersion(selectedPolicyId.value, versionId)
-    draftExpenseTypes.length = 0
-    if (versionDetail.value.ai_draft?.expense_types) {
-      for (const et of versionDetail.value.ai_draft.expense_types) {
-        draftExpenseTypes.push({ ...et })
+  policyApi.getVersion(selectedPolicyId.value, versionId).then(v => {
+    versionDetail.value = v
+    domains.length = 0
+    legacyExpenseTypes.length = 0
+    if (v.ai_draft?.policy_doc?.domains) {
+      for (const d of v.ai_draft.policy_doc.domains) {
+        domains.push({ ...d })
+      }
+    } else if (v.ai_draft?.expense_types) {
+      for (const et of v.ai_draft.expense_types) {
+        legacyExpenseTypes.push({ ...et })
       }
     }
-    if (versionDetail.value.kb_id) await loadCurrentKb(versionDetail.value.kb_id)
-  } catch {
+    if (v.kb_id) loadCurrentKb(v.kb_id)
+  }).catch(() => {
     versionDetail.value = null
     errorMsg.value = 'Failed to load version'
-  }
+  })
 }
 
-async function handleUpload(e: Event) {
+function handleUpload(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
   uploading.value = true
   errorMsg.value = ''
-  try {
-    const res = await policyApi.uploadPdf(file, newPolicyName.value || undefined)
-    await loadPolicies()
-    selectedPolicyId.value = res.policy_id
-    selectedVersionId.value = res.version_id
-    showUpload.value = false
-    newPolicyName.value = ''
-    uploadSummary.value = { kb_id: res.kb_id, policy_name: res.message, version_number: res.version_number }
-    versions.value = await policyApi.listVersions(res.policy_id)
-    versionDetail.value = await policyApi.getVersion(res.policy_id, res.version_id)
-    draftExpenseTypes.length = 0
-    if (versionDetail.value.ai_draft?.expense_types) {
-      for (const et of versionDetail.value.ai_draft.expense_types) {
-        draftExpenseTypes.push({ ...et })
+  policyApi.uploadPdf(file, newPolicyName.value || undefined, autoPublish.value)
+    .then(async (res) => {
+      await loadPolicies()
+      selectedPolicyId.value = res.policy_id
+      selectedVersionId.value = res.version_id
+      showUpload.value = false
+      newPolicyName.value = ''
+      uploadSummary.value = { kb_id: res.kb_id, policy_name: res.message, version_number: res.version_number }
+      versions.value = await policyApi.listVersions(res.policy_id)
+      versionDetail.value = await policyApi.getVersion(res.policy_id, res.version_id)
+      domains.length = 0
+      legacyExpenseTypes.length = 0
+      if (versionDetail.value.ai_draft?.policy_doc?.domains) {
+        for (const d of versionDetail.value.ai_draft.policy_doc.domains) {
+          domains.push({ ...d })
+        }
+      } else if (versionDetail.value.ai_draft?.expense_types) {
+        for (const et of versionDetail.value.ai_draft.expense_types) {
+          legacyExpenseTypes.push({ ...et })
+        }
       }
-    }
-    if (res.kb_id) await loadCurrentKb(res.kb_id)
-  } catch (e: any) {
-    errorMsg.value = e.response?.data?.detail || e.message || 'Upload failed'
-  } finally { uploading.value = false; input.value = '' }
+      if (res.kb_id) await loadCurrentKb(res.kb_id)
+    })
+    .catch((e: any) => {
+      errorMsg.value = e.response?.data?.detail || e.message || 'Upload failed'
+    })
+    .finally(() => { uploading.value = false; input.value = '' })
 }
 
 function confColor(c: number): string {
@@ -314,68 +409,80 @@ function confColor(c: number): string {
   return 'low'
 }
 
-async function saveDraft() {
+function saveDraft() {
   if (!selectedPolicyId.value || !selectedVersionId.value) return
   errorMsg.value = ''
-  try {
-    const draft: PolicyDraft = {
+  let payload: PolicyDraft
+  if (usingNewFormat.value) {
+    payload = {
       enterprise: 'default', description: '',
-      expense_types: [...draftExpenseTypes], warnings: [], metadata: {},
+      expense_types: [],
+      policy_doc: {
+        doc_id: versionDetail.value?.ai_draft?.policy_doc?.doc_id || '',
+        title: versionDetail.value?.ai_draft?.policy_doc?.title || '',
+        version: versionDetail.value?.ai_draft?.policy_doc?.version || '',
+        domains: [...domains],
+      },
+      warnings: versionDetail.value?.ai_draft?.warnings || [],
+      metadata: versionDetail.value?.ai_draft?.metadata || {},
+    } as any
+  } else {
+    payload = {
+      enterprise: 'default', description: '',
+      expense_types: [...legacyExpenseTypes], warnings: [], metadata: {},
     }
-    await policyApi.updateDraft(selectedPolicyId.value, selectedVersionId.value, draft)
-  } catch (e: any) { errorMsg.value = e.response?.data?.detail || 'Save failed' }
+  }
+  policyApi.updateDraft(selectedPolicyId.value, selectedVersionId.value, payload)
+    .catch((e: any) => { errorMsg.value = e.response?.data?.detail || 'Save failed' })
 }
 
-async function doNormalize() {
+function doNormalize() {
   if (!selectedPolicyId.value || !selectedVersionId.value) return
   normalizing.value = true
   errorMsg.value = ''
-  try {
-    await policyApi.normalize(selectedPolicyId.value, selectedVersionId.value)
-    versionDetail.value = await policyApi.getVersion(selectedPolicyId.value, selectedVersionId.value)
-  } catch (e: any) { errorMsg.value = e.response?.data?.detail || 'Normalize failed' }
-  finally { normalizing.value = false }
+  policyApi.normalize(selectedPolicyId.value, selectedVersionId.value)
+    .then(() => policyApi.getVersion(selectedPolicyId.value!, selectedVersionId.value!))
+    .then(v => versionDetail.value = v)
+    .catch((e: any) => { errorMsg.value = e.response?.data?.detail || 'Normalize failed' })
+    .finally(() => normalizing.value = false)
 }
 
-async function doPublish() {
+function doPublish() {
   if (!selectedPolicyId.value || !selectedVersionId.value) return
   if (!confirm('发布此版本？')) return
   publishing.value = true
   errorMsg.value = ''
-  try {
-    await policyApi.publish(selectedPolicyId.value, selectedVersionId.value)
-    versionDetail.value = await policyApi.getVersion(selectedPolicyId.value, selectedVersionId.value)
-    await loadPolicies()
-    versions.value = await policyApi.listVersions(selectedPolicyId.value)
-  } catch (e: any) { errorMsg.value = e.response?.data?.detail || 'Publish failed' }
-  finally { publishing.value = false }
+  policyApi.publish(selectedPolicyId.value, selectedVersionId.value)
+    .then(() => Promise.all([
+      policyApi.getVersion(selectedPolicyId.value!, selectedVersionId.value!),
+    ]))
+    .then(([v]) => { versionDetail.value = v; loadPolicies() })
+    .catch((e: any) => { errorMsg.value = e.response?.data?.detail || 'Publish failed' })
+    .finally(() => publishing.value = false)
 }
 
-async function doActivate() {
+function doActivate() {
   if (!selectedPolicyId.value || !selectedVersionId.value) return
   activating.value = true
   errorMsg.value = ''
-  try {
-    const { data } = await import('../../api').then(m => m.default.post(
-      `/policy/${selectedPolicyId.value}/versions/${selectedVersionId.value}/activate`
-    ))
-    void data
-    versionDetail.value = await policyApi.getVersion(selectedPolicyId.value, selectedVersionId.value)
-    await loadPolicies()
-    versions.value = await policyApi.listVersions(selectedPolicyId.value)
-  } catch (e: any) { errorMsg.value = e.response?.data?.detail || 'Activate failed' }
-  finally { activating.value = false }
+  import('../../api').then(m => m.default.post(`/policy/${selectedPolicyId.value}/versions/${selectedVersionId.value}/activate`))
+    .then(() => Promise.all([
+      policyApi.getVersion(selectedPolicyId.value!, selectedVersionId.value!),
+      loadPolicies(),
+    ]))
+    .then(([v]) => { versionDetail.value = v })
+    .catch((e: any) => { errorMsg.value = e.response?.data?.detail || 'Activate failed' })
+    .finally(() => activating.value = false)
 }
 
-async function loadCurrentKb(kbId: number) {
-  try {
-    const [info, docs] = await Promise.all([
-      kbApi.listBases().then(all => all.find(b => b.id === kbId) || null),
-      kbApi.listDocuments(kbId),
-    ])
+function loadCurrentKb(kbId: number) {
+  Promise.all([
+    kbApi.listBases().then(all => all.find(b => b.id === kbId) || null),
+    kbApi.listDocuments(kbId),
+  ]).then(([info, docs]) => {
     currentKbInfo.value = info
     currentKbDocs.value = docs
-  } catch { /* non-critical */ }
+  }).catch(() => { /* non-critical */ })
 }
 
 function clearCurrentKb() {
@@ -385,29 +492,26 @@ function clearCurrentKb() {
   kbSearchResults.value = []
 }
 
-async function doKbSearch() {
+function doKbSearch() {
   if (!kbSearchQ.value.trim() || !currentKbInfo.value?.id) return
   kbSearching.value = true
-  try {
-    kbSearchResults.value = await kbApi.search(kbSearchQ.value.trim(), currentKbInfo.value.id, 5)
-  } catch { kbSearchResults.value = [] }
-  finally { kbSearching.value = false }
+  kbApi.search(kbSearchQ.value.trim(), currentKbInfo.value.id, 5)
+    .then(r => kbSearchResults.value = r)
+    .catch(() => kbSearchResults.value = [])
+    .finally(() => kbSearching.value = false)
 }
 
-async function toggleDocChunks(docId: number) {
+function toggleDocChunks(docId: number) {
   if (expandedDocs.value.has(docId)) { expandedDocs.value.delete(docId); return }
   expandedDocs.value.add(docId)
   if (!chunkDetails.value.has(docId)) {
-    try {
-      const res = await kbApi.getChunks(docId)
-      chunkDetails.value.set(docId, res.chunks)
-    } catch { chunkDetails.value.set(docId, []) }
+    kbApi.getChunks(docId).then(r => chunkDetails.value.set(docId, r.chunks)).catch(() => chunkDetails.value.set(docId, []))
   }
 }
 
-function scoreColor(score: number): string {
-  if (score >= 0.8) return '#34d399'
-  if (score >= 0.6) return '#fbbf24'
+function scoreColor(s: number): string {
+  if (s >= 0.8) return '#34d399'
+  if (s >= 0.6) return '#fbbf24'
   return '#f87171'
 }
 
@@ -489,6 +593,50 @@ function formatDate(d: string | null): string {
 .warnings { display: flex; flex-direction: column; gap: 4px; }
 .warn-item { font-size: 12px; color: #fbbf24; padding: 6px 10px; background: rgba(251,191,36,0.08); border-radius: 8px; }
 
+/* Domain + Rule cards (new format) */
+.domain-card {
+  background: #0f0f14; border: 1px solid rgba(99,102,241,0.12);
+  border-radius: 12px; padding: 14px; margin-bottom: 8px;
+}
+.domain-header {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
+}
+.domain-name { font-size: 15px; font-weight: 700; color: #e4e4e7; }
+.domain-id { font-size: 10px; color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.04); padding: 2px 6px; border-radius: 4px; }
+.domain-rule-count { font-size: 11px; color: rgba(255,255,255,0.3); margin-left: auto; }
+
+.rule-card {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; margin-bottom: 6px;
+  background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04);
+  border-radius: 10px;
+}
+
+.rule-type-badge {
+  font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 5px;
+  text-transform: uppercase; letter-spacing: 0.3px; width: fit-content;
+}
+.rule-type-limit { background: rgba(52,211,153,0.12); color: #34d399; }
+.rule-type-ratio { background: rgba(99,102,241,0.12); color: #a5b4fc; }
+.rule-type-approval { background: rgba(251,191,36,0.12); color: #fbbf24; }
+.rule-type-requirement { background: rgba(139,92,246,0.12); color: #c4b5fd; }
+.rule-type-restriction { background: rgba(248,113,113,0.12); color: #fca5a5; }
+.rule-type-other { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.4); }
+
+.rule-body { font-size: 13px; }
+.rule-title { font-weight: 600; color: #e4e4e7; margin-bottom: 2px; }
+.rule-details { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: rgba(255,255,255,0.4); }
+.rule-detail strong { color: rgba(255,255,255,0.6); }
+.rule-raw { font-size: 11px; color: rgba(255,255,255,0.25); margin-top: 4px; }
+.raw-label { color: rgba(255,255,255,0.15); }
+.rule-meta { margin-top: 4px; }
+
+.rule-edit-fields {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,0.04);
+}
+
+/* Legacy expense cards */
 .expense-card {
   background: #0f0f14; border: 1px solid rgba(255,255,255,0.06);
   border-radius: 12px; padding: 16px;
@@ -601,4 +749,11 @@ function formatDate(d: string | null): string {
 }
 .input-dark:focus { border-color: rgba(99,102,241,0.4); }
 .input-dark::placeholder { color: rgba(255,255,255,0.15); }
+
+.checkbox-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: rgba(255,255,255,0.4); cursor: pointer;
+  white-space: nowrap;
+}
+.checkbox-label input[type="checkbox"] { accent-color: #6366f1; }
 </style>
