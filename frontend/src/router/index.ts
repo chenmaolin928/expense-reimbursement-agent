@@ -1,30 +1,35 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
-const router = createRouter({
-  history: createWebHashHistory(),
-  routes: [
-    {
-      path: '/login',
-      name: 'login',
-      component: () => import('../views/LoginView.vue'),
-    },
-    {
-      path: '/chat',
-      name: 'chat',
-      component: () => import('../views/ChatView.vue'),
-    },
-    {
-      path: '/admin',
-      name: 'admin',
-      component: () => import('../views/AdminView.vue'),
-    },
-    {
-      path: '/admin/policy',
-      name: 'policy',
-      component: () => import('../views/PolicyManagementView.vue'),
-    },
-    { path: '/:pathMatch(.*)*', redirect: '/login' },
-  ],
-})
+const devMode = import.meta.env.DEV || new URLSearchParams(window.location.search).has('dev')
 
-export default router
+const routes = [
+  {
+    path: '/login',
+    name: 'login',
+    component: () => import('../views/LoginView.vue'),
+  },
+  {
+    path: '/chat',
+    name: 'chat',
+    component: () => import('../views/ChatView.vue'),
+  },
+  {
+    path: '/admin',
+    component: () => import('../views/admin/AdminLayout.vue'),
+    children: [
+      { path: '', redirect: '/admin/knowledge' },
+      { path: 'knowledge', component: () => import('../views/admin/KnowledgeView.vue') },
+      { path: 'policy', component: () => import('../views/admin/PolicyView.vue') },
+      { path: 'analytics', component: () => import('../views/admin/AnalyticsView.vue') },
+      ...(devMode
+        ? [{ path: 'debug', component: () => import('../views/admin/DevDebugView.vue') }]
+        : []),
+    ],
+  },
+  { path: '/:pathMatch(.*)*', redirect: '/login' },
+]
+
+export default createRouter({
+  history: createWebHashHistory(),
+  routes,
+})

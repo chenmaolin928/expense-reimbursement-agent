@@ -1,21 +1,55 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, reactive, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import api from '../api'
+import { policyApi, type PolicyListItem, type PolicyVersionItem, type PolicyVersionDetail, type DraftExpenseType, type PolicyDraft } from '../api/policy'
+import { kbApi, type KbInfo, type KbDocument, type KbSearchResult } from '../api/knowledge'
 
 const router = useRouter()
 const auth = useAuthStore()
 
+// ── Stats ──────────────────────────────────────────
+const stats = ref<any>({})
+
+// ── Policy Center ──────────────────────────────────
+const policies = ref<PolicyListItem[]>([])
+const selectedPolicyId = ref<number | null>(null)
+const selectedVersionId = ref<number | null>(null)
+const versionDetail = ref<PolicyVersionDetail | null>(null)
+const versions = ref<PolicyVersionItem[]>([])
+const uploading = ref(false)
+const normalizing = ref(false)
+const publishing = ref(false)
+const draftExpenseTypes = reactive<DraftExpenseType[]>([])
+const newPolicyName = ref('')
+const errorMsg = ref('')
+const showUpload = ref(true)
+const loading = ref(false)
+const uploadSummary = ref<{ kb_id: number | null; policy_name: string; version_number: number } | null>(null)
+
+// ── Current KB (right panel) ───────────────────────
+const currentKbInfo = ref<KbInfo | null>(null)
+const currentKbDocs = ref<KbDocument[]>([])
+const currentKbLoading = ref(false)
+
+// ── KB Search (right panel) ────────────────────────
+const kbSearchQ = ref('')
+const kbSearchResults = ref<KbSearchResult[]>([])
+const kbSearching = ref(false)
+
+// ── All Knowledge Bases ────────────────────────────
 const kbName = ref('')
 const kbDesc = ref('')
 const kbs = ref<any[]>([])
-const stats = ref<any>({})
 const uploadingDoc = ref<number | null>(null)
 const expandedKb = ref<number | null>(null)
+
+// ── Doc chunk expansion (shared) ───────────────────
 const expandedDocs = ref<Set<number>>(new Set())
 const chunkDetails = ref<Map<number, any[]>>(new Map())
 
+// ── Search Debug ───────────────────────────────────
 const searchQuery = ref('')
 const searchTopK = ref(5)
 const searchThreshold = ref(0)
@@ -24,11 +58,194 @@ const searchMode = ref<'normal' | 'raw'>('normal')
 const searching = ref(false)
 const searchResults = ref<any[]>([])
 const searchMeta = ref<any>(null)
+const sortField = ref<'score' | 'distance'>('score')
+const sortDir = ref<-1 | 1>(-1)
+const sortedResults = computed(() => {
+  const arr = [...searchResults.value]
+  arr.sort((a, b) => {
+    const va = sortField.value === 'score' ? (a.score ?? a.cosine_similarity ?? 0) : (a.distance ?? 999)
+    const vb = sortField.value === 'score' ? (b.score ?? b.cosine_similarity ?? 0) : (b.distance ?? 999)
+    return (va - vb) * sortDir.value
+  })
+  return arr
+})
 
-onMounted(async () => { await loadKBs(); await loadStats() })
+// ── Lifecycle ──────────────────────────────────────
+onMounted(async () => { await Promise.all([loadPolicies(), loadKBs(), loadStats()]) })
 
-async function loadKBs() { const res = await api.get('/knowledge/bases'); kbs.value = res.data }
-async function loadStats() { const res = await api.get('/admin/stats'); stats.value = res.data }
+async function loadStats() {
+  try { const res = await api.get('/admin/stats'); stats.value = res.data } catch {}
+}
+
+// ── Policy Center ──────────────────────────────────
+async function loadPolicies() {
+  loading.value = true
+  try { policies.value = await policyApi.list() } catch { errorMsg.value = 'Failed to load policies' }
+  finally { loading.value = false }
+}
+
+function startNew() {
+  selectedPolicyId.value = null
+  selectedVersionId.value = null
+  versionDetail.value = null
+  versions.value = []
+  draftExpenseTypes.length = 0
+  showUpload.value = true
+  errorMsg.value = ''
+  uploadSummary.value = null
+  clearCurrentKb()
+}
+
+async function selectPolicy(id: number) {
+  selectedPolicyId.value = id
+  selectedVersionId.value = null
+  versionDetail.value = null
+  draftExpenseTypes.length = 0
+  showUpload.value = false
+  errorMsg.value = ''
+  uploadSummary.value = null
+  clearCurrentKb()
+  try { versions.value = await policyApi.listVersions(id) } catch { versions.value = [] }
+}
+
+async function selectVersion(versionId: number) {
+  if (!selectedPolicyId.value) return
+  selectedVersionId.value = versionId
+  errorMsg.value = ''
+  clearCurrentKb()
+  try {
+    versionDetail.value = await policyApi.getVersion(selectedPolicyId.value, versionId)
+    draftExpenseTypes.length = 0
+    if (versionDetail.value.ai_draft?.expense_types) {
+      for (const et of versionDetail.value.ai_draft.expense_types) {
+        draftExpenseTypes.push({ ...et })
+      }
+    }
+    if (versionDetail.value.kb_id) await loadCurrentKb(versionDetail.value.kb_id)
+  } catch {
+    versionDetail.value = null
+    errorMsg.value = 'Failed to load version'
+  }
+}
+
+async function handleUpload(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  uploading.value = true
+  errorMsg.value = ''
+  try {
+    const res = await policyApi.uploadPdf(file, newPolicyName.value || undefined)
+    await loadPolicies()
+    await loadKBs() // refresh KB list too
+    selectedPolicyId.value = res.policy_id
+    selectedVersionId.value = res.version_id
+    showUpload.value = false
+    newPolicyName.value = ''
+    uploadSummary.value = { kb_id: res.kb_id, policy_name: res.message, version_number: res.version_number }
+    versions.value = await policyApi.listVersions(res.policy_id)
+    versionDetail.value = await policyApi.getVersion(res.policy_id, res.version_id)
+    draftExpenseTypes.length = 0
+    if (versionDetail.value.ai_draft?.expense_types) {
+      for (const et of versionDetail.value.ai_draft.expense_types) {
+        draftExpenseTypes.push({ ...et })
+      }
+    }
+    if (res.kb_id) await loadCurrentKb(res.kb_id)
+  } catch (e: any) {
+    errorMsg.value = e.response?.data?.detail || e.message || 'Upload failed'
+  } finally {
+    uploading.value = false
+    input.value = ''
+  }
+}
+
+function confColor(c: number): string {
+  if (c >= 0.9) return 'high'
+  if (c >= 0.7) return 'medium'
+  return 'low'
+}
+
+async function saveDraft() {
+  if (!selectedPolicyId.value || !selectedVersionId.value) return
+  errorMsg.value = ''
+  try {
+    const draft: PolicyDraft = {
+      enterprise: 'default', description: '',
+      expense_types: [...draftExpenseTypes], warnings: [], metadata: {},
+    }
+    await policyApi.updateDraft(selectedPolicyId.value, selectedVersionId.value, draft)
+  } catch (e: any) {
+    errorMsg.value = e.response?.data?.detail || 'Save failed'
+  }
+}
+
+async function doNormalize() {
+  if (!selectedPolicyId.value || !selectedVersionId.value) return
+  normalizing.value = true
+  errorMsg.value = ''
+  try {
+    await policyApi.normalize(selectedPolicyId.value, selectedVersionId.value)
+    versionDetail.value = await policyApi.getVersion(selectedPolicyId.value, selectedVersionId.value)
+  } catch (e: any) {
+    errorMsg.value = e.response?.data?.detail || 'Normalize failed'
+  } finally {
+    normalizing.value = false
+  }
+}
+
+async function doPublish() {
+  if (!selectedPolicyId.value || !selectedVersionId.value) return
+  if (!confirm('Publish this policy version?')) return
+  publishing.value = true
+  errorMsg.value = ''
+  try {
+    await policyApi.publish(selectedPolicyId.value, selectedVersionId.value)
+    versionDetail.value = await policyApi.getVersion(selectedPolicyId.value, selectedVersionId.value)
+    await loadPolicies()
+    versions.value = await policyApi.listVersions(selectedPolicyId.value)
+  } catch (e: any) {
+    errorMsg.value = e.response?.data?.detail || 'Publish failed'
+  } finally {
+    publishing.value = false
+  }
+}
+
+// ── Current KB Panel ───────────────────────────────
+async function loadCurrentKb(kbId: number) {
+  currentKbLoading.value = true
+  try {
+    const [info, docs] = await Promise.all([
+      kbApi.listBases().then(all => all.find(b => b.id === kbId) || null),
+      kbApi.listDocuments(kbId),
+    ])
+    currentKbInfo.value = info
+    currentKbDocs.value = docs
+  } catch { /* non-critical */ }
+  finally { currentKbLoading.value = false }
+}
+
+function clearCurrentKb() {
+  currentKbInfo.value = null
+  currentKbDocs.value = []
+  currentKbLoading.value = false
+  kbSearchQ.value = ''
+  kbSearchResults.value = []
+}
+
+async function doKbSearch() {
+  if (!kbSearchQ.value.trim() || !currentKbInfo.value?.id) return
+  kbSearching.value = true
+  try {
+    kbSearchResults.value = await kbApi.search(kbSearchQ.value.trim(), currentKbInfo.value.id, 5)
+  } catch { kbSearchResults.value = [] }
+  finally { kbSearching.value = false }
+}
+
+// ── All Knowledge Bases ────────────────────────────
+async function loadKBs() {
+  try { const res = await api.get('/knowledge/bases'); kbs.value = res.data } catch {}
+}
 
 async function createKB() {
   if (!kbName.value.trim()) return
@@ -37,7 +254,10 @@ async function createKB() {
   await loadKBs()
 }
 
-async function deleteKB(id: number) { await api.delete(`/knowledge/bases/${id}`); await loadKBs() }
+async function deleteKB(id: number) {
+  await api.delete(`/knowledge/bases/${id}`)
+  await loadKBs()
+}
 
 async function uploadDoc(kbId: number, e: Event) {
   const input = e.target as HTMLInputElement
@@ -56,79 +276,37 @@ async function loadDocs(kbId: number) {
   kbs.value = kbs.value.map(kb => kb.id === kbId ? { ...kb, _docs: res.data } : kb)
 }
 
+async function chromaStats() {
+  try {
+    const res = await api.get('/knowledge/chroma-stats')
+    alert(JSON.stringify(res.data, null, 2))
+  } catch {}
+}
+
 async function toggleKb(kbId: number) {
   if (expandedKb.value === kbId) { expandedKb.value = null; return }
   expandedKb.value = kbId
   await loadDocs(kbId)
 }
 
+// ── Doc chunk toggle (shared) ──────────────────────
 async function toggleDocChunks(docId: number) {
   if (expandedDocs.value.has(docId)) {
     expandedDocs.value.delete(docId)
     return
   }
   expandedDocs.value.add(docId)
-  const res = await api.get(`/knowledge/documents/${docId}/chunks`)
-  chunkDetails.value.set(docId, res.data.chunks || [])
-}
-
-async function chromaStats() {
-  const res = await api.get('/knowledge/chroma-stats')
-  alert(JSON.stringify(res.data, null, 2))
-}
-
-// ---- Policy Center ----
-const policyText = ref('')
-const parsedPolicy = ref<any>(null)
-const parseWarnings = ref<string[]>([])
-const parsing = ref(false)
-const saving = ref(false)
-const currentPolicy = ref<any>(null)
-const policyLoading = ref(false)
-
-async function parsePolicy() {
-  if (!policyText.value.trim()) return
-  parsing.value = true
-  parseWarnings.value = []
-  try {
-    const res = await api.post('/policy/parse', { text: policyText.value.trim() })
-    parsedPolicy.value = res.data.policy
-    parseWarnings.value = res.data.warnings || []
-  } catch (e: any) {
-    alert('Parse failed: ' + (e.response?.data?.detail || e.message))
-  } finally {
-    parsing.value = false
+  if (!chunkDetails.value.has(docId)) {
+    try {
+      const res = await kbApi.getChunks(docId)
+      chunkDetails.value.set(docId, res.chunks)
+    } catch {
+      chunkDetails.value.set(docId, [])
+    }
   }
 }
 
-async function loadCurrentPolicy() {
-  policyLoading.value = true
-  try {
-    const res = await api.get('/policy/current')
-    currentPolicy.value = res.data
-  } catch {
-    currentPolicy.value = null
-  } finally {
-    policyLoading.value = false
-  }
-}
-
-async function savePolicy() {
-  if (!parsedPolicy.value) return
-  saving.value = true
-  try {
-    const res = await api.put('/policy/current', { enterprise: 'default', policy: parsedPolicy.value })
-    currentPolicy.value = res.data
-    alert('政策保存成功！')
-  } catch (e: any) {
-    alert('Save failed: ' + (e.response?.data?.detail || e.message))
-  } finally {
-    saving.value = false
-  }
-}
-
-function policyJson(v: any) { return JSON.stringify(v, null, 2) }
-
+// ── Search Debug ───────────────────────────────────
 async function doSearch() {
   if (!searchQuery.value.trim()) return
   searching.value = true
@@ -140,23 +318,13 @@ async function doSearch() {
       if (searchThreshold.value > 0) params.threshold = searchThreshold.value
       const res = await api.get('/knowledge/chroma-search-raw', { params })
       searchResults.value = res.data.results || []
-      searchMeta.value = {
-        total_results: res.data.total_results,
-        top_k: res.data.top_k,
-        threshold: res.data.threshold,
-        kb_id_filter: res.data.kb_id_filter,
-      }
+      searchMeta.value = { total_results: res.data.total_results, top_k: res.data.top_k, threshold: res.data.threshold, kb_id_filter: res.data.kb_id_filter }
     } else {
       params.top_k = searchTopK.value
       if (searchThreshold.value > 0) params.threshold = searchThreshold.value
       const res = await api.get('/knowledge/search', { params })
       searchResults.value = res.data
-      searchMeta.value = {
-        total_results: res.data.length,
-        top_k: searchTopK.value,
-        threshold: searchThreshold.value,
-        kb_id_filter: searchKbId.value,
-      }
+      searchMeta.value = { total_results: res.data.length, top_k: searchTopK.value, threshold: searchThreshold.value, kb_id_filter: searchKbId.value }
     }
   } catch (e: any) {
     alert('Search failed: ' + (e.response?.data?.detail || e.message))
@@ -170,33 +338,17 @@ async function doSearch() {
 function scoreColor(score: number): string {
   if (score >= 0.8) return '#34d399'
   if (score >= 0.6) return '#fbbf24'
-  if (score >= 0.4) return '#f97316'
   return '#f87171'
 }
 
-type SortField = 'score' | 'distance'
-const sortField = ref<SortField>('score')
-const sortDir = ref<-1 | 1>(-1)
-const sortedResults = computed(() => {
-  const arr = [...searchResults.value]
-  arr.sort((a, b) => {
-    const va = sortField.value === 'score' ? (a.score ?? a.cosine_similarity ?? 0) : (a.distance ?? 999)
-    const vb = sortField.value === 'score' ? (b.score ?? b.cosine_similarity ?? 0) : (b.distance ?? 999)
-    return (va - vb) * sortDir.value
-  })
-  return arr
-})
-
+// ── Misc ───────────────────────────────────────────
 function logout() { auth.logout(); router.push('/login') }
 
 const statusLabels: Record<string, string> = {
   draft: 'Draft', submitted: 'Submitted', manager_approval: 'Manager Review',
   finance_approval: 'Finance Review', approved: 'Approved', paid: 'Paid', rejected: 'Rejected',
 }
-
-function statusClassName(key: string | number): string {
-  return String(key)
-}
+function statusClassName(key: string | number): string { return String(key) }
 </script>
 
 <template>
@@ -218,7 +370,7 @@ function statusClassName(key: string | number): string {
     </header>
 
     <div class="admin-body">
-      <!-- Stats grid -->
+      <!-- Stats -->
       <section class="stat-grid">
         <div class="stat-card">
           <div class="stat-icon reports">
@@ -262,14 +414,10 @@ function statusClassName(key: string | number): string {
       <section class="status-section" v-if="stats.by_status">
         <h3>Report Status Breakdown</h3>
         <div class="status-bar">
-          <div
-            v-for="(count, key) in stats.by_status"
-            :key="key"
-            class="status-seg"
-            :class="statusClassName(key)"
-            :style="{ flex: Math.max(count, 1) }"
-            :title="`${statusLabels[key] || key}: ${count}`"
-          >
+          <div v-for="(count, key) in stats.by_status" :key="key"
+               class="status-seg" :class="statusClassName(key)"
+               :style="{ flex: Math.max(count, 1) }"
+               :title="`${statusLabels[key] || key}: ${count}`">
             <span v-if="count > 0" class="seg-label">{{ count }}</span>
           </div>
         </div>
@@ -280,197 +428,311 @@ function statusClassName(key: string | number): string {
         </div>
       </section>
 
-      <div class="content-grid">
-        <!-- Create KB -->
-        <section class="panel">
-          <h3>New Knowledge Base</h3>
-          <p class="panel-desc">Upload company reimbursement policy documents — supported formats: <strong>.txt</strong>, <strong>.docx</strong>, <strong>.pdf</strong></p>
-          <div class="kb-create">
-            <input v-model="kbName" placeholder="Knowledge base name" class="input-dark" />
-            <input v-model="kbDesc" placeholder="Description (optional)" class="input-dark" />
-            <button @click="createKB" class="btn-primary">Create</button>
-          </div>
-        </section>
+      <!-- ── Main Two-Column Layout ─────────────────────── -->
+      <div class="admin-main">
+        <!-- ====== LEFT COLUMN: Policy Center ====== -->
+        <div class="admin-left">
+          <div class="left-section">
+            <div class="left-section-header">
+              <h2>Policy Center</h2>
+              <button v-if="!showUpload" @click="startNew" class="btn-primary btn-upload">+ Upload PDF</button>
+            </div>
 
-        <!-- KB List -->
-        <section class="panel" style="grid-column: span 2;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-            <h3 style="margin:0;">Knowledge Bases</h3>
-            <button class="btn-sm" @click="chromaStats">ChromaDB Stats</button>
-          </div>
-          <div v-if="kbs.length === 0" class="panel-empty">No knowledge bases yet. Create one above.</div>
-          <div v-for="kb in kbs" :key="kb.id">
-            <div class="kb-row" @click="toggleKb(kb.id)" style="cursor:pointer;">
-              <div class="kb-info">
-                <span class="kb-name">{{ kb.name }}</span>
-                <span class="kb-desc">{{ kb.description }}</span>
-              </div>
-              <div class="kb-meta">
-                <span class="kb-count">{{ kb.document_count }} docs</span>
-              </div>
-              <div class="kb-actions">
-                <label :class="['btn-sm', { loading: uploadingDoc === kb.id }]">
-                  <input type="file" hidden @change="uploadDoc(kb.id, $event)" @click.stop accept=".txt,.docx,.pdf" />
-                  {{ uploadingDoc === kb.id ? 'Uploading...' : 'Upload Doc' }}
-                </label>
-                <button class="btn-sm btn-danger" @click.stop="deleteKB(kb.id)">Delete</button>
+            <!-- Policy list -->
+            <div v-if="policies.length > 0 && !loading" class="policy-list">
+              <div v-for="p in policies" :key="p.id"
+                   :class="['policy-item', { active: p.id === selectedPolicyId }]"
+                   @click="selectPolicy(p.id)">
+                <span class="policy-name">{{ p.name || 'Unnamed Policy' }}</span>
+                <span :class="['status-badge', p.status]">{{ p.status }}</span>
               </div>
             </div>
-            <!-- Expanded: document list with chunks -->
-            <div v-if="expandedKb === kb.id" class="kb-docs">
-              <div v-if="!kb._docs || kb._docs.length === 0" class="panel-empty" style="padding:10px;">No documents yet.</div>
-              <div v-for="doc in (kb._docs || [])" :key="doc.id" class="doc-item">
-                <div class="doc-header" @click="toggleDocChunks(doc.id)">
-                  <span class="doc-name">📄 {{ doc.filename }}</span>
-                  <span class="doc-meta">{{ doc.chunk_count }} chunks · {{ new Date(doc.created_at).toLocaleDateString() }}</span>
-                  <span class="doc-expand">{{ expandedDocs.has(doc.id) ? '▾' : '▸' }}</span>
+            <div v-if="loading" class="policy-loading">Loading policies...</div>
+          </div>
+
+          <!-- Error bar -->
+          <div v-if="errorMsg" class="error-bar">{{ errorMsg }}</div>
+
+          <!-- ── Upload Zone ── -->
+          <div v-if="showUpload" class="upload-zone">
+            <h3>Upload Policy PDF</h3>
+            <p class="upload-desc">Upload a company reimbursement policy document. The AI will parse it into structured expense rules and build a searchable knowledge base.</p>
+            <div class="upload-drop">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="upload-icon">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              <p>Drop PDF here or click to browse</p>
+            </div>
+            <div class="upload-row">
+              <label class="btn-primary file-label">
+                Choose PDF
+                <input type="file" accept=".pdf" @change="handleUpload" hidden />
+              </label>
+              <input v-model="newPolicyName" placeholder="Policy name (optional)" class="input-dark" />
+            </div>
+            <p v-if="uploading" class="upload-status">Uploading & parsing...</p>
+          </div>
+
+          <!-- ── Editor Area (when policy selected) ── -->
+          <div v-if="selectedPolicyId && !showUpload" class="version-area">
+            <!-- Upload summary card -->
+            <div v-if="uploadSummary" class="upload-summary">
+              <div class="summary-row">
+                <span class="summary-icon">✅</span>
+                <span class="summary-label">KB Created</span>
+                <span class="summary-detail" v-if="currentKbInfo">
+                  "{{ currentKbInfo.name }}" · {{ currentKbInfo.document_count }} doc · <strong>{{ currentKbDocs.reduce((s, d) => s + d.chunk_count, 0) }}</strong> chunks indexed
+                </span>
+                <span class="summary-detail" v-else>KB ID: {{ uploadSummary.kb_id }}</span>
+              </div>
+              <div class="summary-row">
+                <span class="summary-icon">🤖</span>
+                <span class="summary-label">AI Parsed</span>
+                <span class="summary-detail">
+                  {{ draftExpenseTypes.length }} expense types
+                  <template v-if="draftExpenseTypes.length">
+                    · {{ draftExpenseTypes.filter(e => e.confidence >= 0.7).length }} high-confidence
+                    <span v-if="draftExpenseTypes.filter(e => e.confidence < 0.7).length" class="warn-inline">
+                      · {{ draftExpenseTypes.filter(e => e.confidence < 0.7).length }} need review
+                    </span>
+                  </template>
+                </span>
+              </div>
+            </div>
+
+            <!-- Version tabs -->
+            <div class="version-tabs" v-if="versions.length > 0">
+              <button v-for="v in versions" :key="v.id"
+                      :class="['tab', { active: v.id === selectedVersionId }]"
+                      @click="selectVersion(v.id)">
+                v{{ v.version_number }}
+                <span :class="['status-dot', v.status]" />
+              </button>
+            </div>
+            <div v-else class="panel-empty">No versions yet.</div>
+
+            <!-- Draft editor -->
+            <div v-if="versionDetail?.ai_draft" class="draft-editor">
+              <div v-if="versionDetail.ai_draft.warnings?.length" class="warnings">
+                <div v-for="w in versionDetail.ai_draft.warnings" :key="w" class="warn-item">⚠️ {{ w }}</div>
+              </div>
+
+              <h3 class="section-title">Expense Types ({{ draftExpenseTypes.length }})</h3>
+              <div v-if="draftExpenseTypes.length === 0" class="panel-empty">No expense types found in draft.</div>
+
+              <div v-for="(et, i) in draftExpenseTypes" :key="et.code || i" class="expense-card">
+                <div class="card-header">
+                  <span class="card-name">{{ et.name }} <code class="card-code">{{ et.code }}</code></span>
+                  <span :class="['confidence', confColor(et.confidence)]">{{ (et.confidence * 100).toFixed(0) }}%</span>
                 </div>
-                <div v-if="expandedDocs.has(doc.id) && chunkDetails.has(doc.id)" class="doc-chunks">
-                  <div v-for="c in (chunkDetails.get(doc.id) || [])" :key="c.index" class="chunk-item">
-                    <span class="chunk-idx">#{{ c.index }}</span>
-                    <span class="chunk-text">{{ c.text }}</span>
-                    <span class="chunk-len">{{ c.char_count }}c</span>
+                <div class="card-fields">
+                  <label class="field">Reimbursement Ratio
+                    <input v-model.number="et.reimbursement_ratio" type="number" min="0" max="1" step="0.05" class="input-dark field-input" />
+                  </label>
+                  <label class="field">Max Amount
+                    <input v-model.number="et.max_amount" type="number" class="input-dark field-input" />
+                  </label>
+                  <label class="field">Approval Over
+                    <input v-model.number="et.approval_over" type="number" class="input-dark field-input" />
+                  </label>
+                  <label class="field checkbox-field">
+                    <input v-model="et.need_invoice" type="checkbox" /> Need Invoice
+                  </label>
+                  <label class="field checkbox-field">
+                    <input v-model="et.need_guest" type="checkbox" /> Need Guest List
+                  </label>
+                  <label class="field checkbox-field">
+                    <input v-model="et.need_attachment" type="checkbox" /> Need Attachment
+                  </label>
+                  <label class="field checkbox-field">
+                    <input v-model="et.enabled" type="checkbox" /> Enabled
+                  </label>
+                </div>
+                <div class="card-source" v-if="et.source_text">
+                  <span class="source-label">Source:</span> {{ et.source_text }}
+                </div>
+              </div>
+
+              <div class="editor-actions">
+                <button @click="saveDraft" class="btn-primary">Save Draft</button>
+                <button @click="doNormalize" :disabled="normalizing" class="btn-secondary">
+                  {{ normalizing ? 'Normalizing...' : 'Normalize → Policy JSON' }}
+                </button>
+              </div>
+            </div>
+
+            <!-- No draft -->
+            <div v-if="selectedVersionId && !versionDetail?.ai_draft && !errorMsg" class="panel-empty">
+              Select a version to edit its draft.
+            </div>
+
+            <!-- Policy JSON preview -->
+            <details v-if="versionDetail?.policy_json" class="json-preview">
+              <summary>Policy JSON (published rules)</summary>
+              <pre>{{ JSON.stringify(versionDetail.policy_json, null, 2) }}</pre>
+            </details>
+
+            <!-- Publish -->
+            <div v-if="versionDetail?.policy_json && versionDetail.status !== 'published'" class="publish-bar">
+              <p>This version has been normalized and is ready to publish.</p>
+              <button @click="doPublish" :disabled="publishing" class="btn-publish">
+                {{ publishing ? 'Publishing...' : 'Publish' }}
+              </button>
+            </div>
+            <div v-if="versionDetail?.status === 'published'" class="published-badge">
+              Published on {{ versionDetail.published_at ? new Date(versionDetail.published_at).toLocaleDateString() : '—' }}
+            </div>
+          </div>
+        </div>
+
+        <!-- ====== RIGHT COLUMN: Knowledge Base ====== -->
+        <div class="admin-right">
+          <!-- Current Policy KB -->
+          <div v-if="currentKbInfo" class="panel">
+            <h3>📚 {{ currentKbInfo.name }}</h3>
+            <div class="kb-meta-row">
+              <span class="kb-meta-tag">ID: {{ currentKbInfo.id }}</span>
+              <span :class="['kb-meta-tag', currentKbInfo.is_active ? 'tag-active' : 'tag-inactive']">
+                {{ currentKbInfo.is_active ? 'active' : 'inactive' }}
+              </span>
+            </div>
+            <p v-if="currentKbInfo.description" class="kb-desc-text">{{ currentKbInfo.description }}</p>
+
+            <!-- Documents -->
+            <div v-if="currentKbDocs.length > 0" class="kb-docs-list">
+              <div v-for="doc in currentKbDocs" :key="doc.id" class="kb-doc-item">
+                <div :class="['kb-doc-hdr', { open: expandedDocs.has(doc.id) }]"
+                     @click="toggleDocChunks(doc.id)">
+                  <span class="kb-doc-name">📄 {{ doc.filename }}</span>
+                  <span class="kb-doc-meta">{{ doc.chunk_count }} chunks</span>
+                </div>
+                <div v-if="expandedDocs.has(doc.id) && chunkDetails.has(doc.id)" class="kb-doc-chunks">
+                  <div v-for="c in (chunkDetails.get(doc.id) || [])" :key="c.index" class="kb-chunk-item">
+                    <span class="cidx">#{{ c.index }}</span>
+                    <span class="ctext">{{ c.text }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- KB Search -->
+            <div class="kb-search-box">
+              <h4>🔍 Test Search</h4>
+              <div class="kb-search-row">
+                <input v-model="kbSearchQ" placeholder="Search policy content..." class="input-dark kb-search-input" @keyup.enter="doKbSearch" />
+                <button @click="doKbSearch" :disabled="kbSearching" class="btn-sm">{{ kbSearching ? '...' : 'Go' }}</button>
+              </div>
+              <div v-if="kbSearchResults.length > 0" class="kb-results">
+                <div v-for="(r, i) in kbSearchResults" :key="r.chunk_id" class="kb-result-item">
+                  <div class="kb-result-hdr">
+                    <span class="result-rank">#{{ i + 1 }}</span>
+                    <span class="result-file">{{ r.filename }}</span>
+                    <span class="result-score" :style="{ color: scoreColor(r.score) }">{{ (r.score * 100).toFixed(0) }}%</span>
+                  </div>
+                  <div class="result-snippet">{{ r.snippet }}</div>
+                </div>
+              </div>
+              <div v-if="!kbSearching && kbSearchQ && kbSearchResults.length === 0" class="search-empty">No results.</div>
+            </div>
+          </div>
+
+          <!-- All Knowledge Bases -->
+          <div class="panel">
+            <h3>📦 All Knowledge Bases</h3>
+
+            <!-- Create KB -->
+            <div class="kb-create">
+              <input v-model="kbName" placeholder="Knowledge base name" class="input-dark" />
+              <div class="kb-create-row">
+                <input v-model="kbDesc" placeholder="Description (optional)" class="input-dark" />
+                <button @click="createKB" class="btn-primary btn-sm">Create</button>
+              </div>
+            </div>
+
+            <!-- KB List -->
+            <div v-if="kbs.length === 0" class="panel-empty">No knowledge bases yet.</div>
+            <div v-for="kb in kbs" :key="kb.id">
+              <div class="kb-row" @click="toggleKb(kb.id)">
+                <div class="kb-row-info">
+                  <span class="kb-row-name">{{ kb.name }}</span>
+                  <span class="kb-row-desc">{{ kb.description }}</span>
+                </div>
+                <div class="kb-row-meta">
+                  <span class="kb-count">{{ kb.document_count }} docs</span>
+                  <label class="btn-sm btn-upload-kb" @click.stop>
+                    <input type="file" hidden @change="uploadDoc(kb.id, $event)" accept=".txt,.docx,.pdf" />
+                    {{ uploadingDoc === kb.id ? '...' : '+' }}
+                  </label>
+                  <button class="btn-sm btn-danger" @click.stop="deleteKB(kb.id)">×</button>
+                </div>
+              </div>
+              <!-- Expanded KB: documents + chunks -->
+              <div v-if="expandedKb === kb.id" class="kb-expanded-docs">
+                <div v-if="!kb._docs || kb._docs.length === 0" class="panel-empty">No documents yet.</div>
+                <div v-for="doc in (kb._docs || [])" :key="doc.id" class="kb-exp-doc">
+                  <div class="kb-exp-doc-hdr" @click="toggleDocChunks(doc.id)">
+                    <span class="kb-doc-name">📄 {{ doc.filename }}</span>
+                    <span class="kb-doc-meta">{{ doc.chunk_count }} chunks · {{ new Date(doc.created_at).toLocaleDateString() }}</span>
+                    <span class="doc-expand-icon">{{ expandedDocs.has(doc.id) ? '▾' : '▸' }}</span>
+                  </div>
+                  <div v-if="expandedDocs.has(doc.id) && chunkDetails.has(doc.id)" class="kb-doc-chunks">
+                    <div v-for="c in (chunkDetails.get(doc.id) || [])" :key="c.index" class="kb-chunk-item">
+                      <span class="cidx">#{{ c.index }}</span>
+                      <span class="ctext">{{ c.text }}</span>
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
           </div>
-        </section>
 
-        <!-- Policy Center -->
-        <section class="panel" style="margin-top: 24px;">
-          <h3>⚙️ Policy Center</h3>
-          <p class="panel-desc">Upload policy text → AI parses it into structured rules → review & save to repository.</p>
-
-          <div style="margin-bottom:16px;">
-            <textarea
-              v-model="policyText"
-              placeholder="Paste company reimbursement policy text here (Chinese)... e.g. &#10;餐饮费报销标准：按实际消费金额的60%报销，单次上限500元。&#10;差旅费报销标准：按实际消费金额的80%报销，单次上限500元。&#10;商务招待费报销标准：按实际消费金额的80%报销，单次上限1000元，超过1000元需审批，需提供宾客名单。"
-              class="input-dark"
-              style="height:120px; font-family:inherit; resize:vertical;"
-            />
-          </div>
-
-          <div style="display:flex; gap:10px; margin-bottom:16px;">
-            <button @click="parsePolicy" :disabled="parsing" class="btn-primary">
-              {{ parsing ? 'Parsing...' : '🤖 AI Parse' }}
-            </button>
-            <button @click="loadCurrentPolicy" :disabled="policyLoading" class="btn-sm">
-              {{ policyLoading ? 'Loading...' : '📋 Load Current' }}
-            </button>
-            <button
-              v-if="parsedPolicy"
-              @click="savePolicy"
-              :disabled="saving"
-              class="btn-sm"
-              style="background: rgba(52,211,153,0.15); color: #34d399;"
-            >
-              {{ saving ? 'Saving...' : '💾 Save to Repository' }}
-            </button>
-          </div>
-
-          <!-- Warnings -->
-          <div v-if="parseWarnings.length > 0" style="margin-bottom:12px;">
-            <div v-for="(w, i) in parseWarnings" :key="i" style="color:#fbbf24; font-size:12px; padding:4px 0;">⚠️ {{ w }}</div>
-          </div>
-
-          <!-- Parsed JSON editor -->
-          <div v-if="parsedPolicy" style="margin-bottom:16px;">
-            <label style="font-size:12px; color:rgba(255,255,255,0.4); margin-bottom:4px; display:block;">Parsed Policy (editable JSON)</label>
-            <textarea
-              :value="policyJson(parsedPolicy)"
-              @input="(e: any) => { try { parsedPolicy = JSON.parse((e.target as HTMLTextAreaElement).value) } catch {} }"
-              class="input-dark"
-              style="height:300px; font-family:'Consolas','Courier New',monospace; font-size:12px; resize:vertical;"
-            />
-          </div>
-
-          <!-- Current active policy (read-only) -->
-          <div v-if="currentPolicy" style="margin-top:12px;">
-            <label style="font-size:12px; color:rgba(255,255,255,0.4); margin-bottom:4px; display:block;">📦 Active Policy (read-only)</label>
-            <pre style="
-              background:#18181b; border:1px solid rgba(255,255,255,0.06); border-radius:10px;
-              padding:14px; font-size:12px; color: rgba(255,255,255,0.5);
-              max-height:200px; overflow:auto; white-space:pre-wrap;
-            ">{{ policyJson(currentPolicy) }}</pre>
-          </div>
-        </section>
+          <!-- ChromaDB Stats -->
+          <button @click="chromaStats" class="btn-sm btn-chroma">ChromaDB Stats</button>
+        </div>
       </div>
 
-      <!-- Search Debug Panel -->
-      <section class="panel" style="margin-top: 24px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px;">
-          <h3 style="margin:0;">🔍 Search Debug</h3>
-          <span style="font-size:11px; color: rgba(255,255,255,0.3);">Test retrieval quality & tune parameters</span>
-        </div>
-
-        <!-- Controls -->
+      <!-- ── Search Debug (collapsible) ──────────────────── -->
+      <details class="search-debug-panel">
+        <summary>🔍 Search Debug <span class="debug-sub">Test retrieval quality &amp; tune parameters</span></summary>
         <div class="search-controls">
           <div class="search-row">
-            <input
-              v-model="searchQuery"
-              placeholder="Enter search query..."
-              class="input-dark"
-              style="flex:1;"
-              @keyup.enter="doSearch"
-            />
-            <button @click="doSearch" :disabled="searching" class="btn-primary">
-              {{ searching ? 'Searching...' : 'Search' }}
-            </button>
+            <input v-model="searchQuery" placeholder="Enter search query..." class="input-dark" style="flex:1;" @keyup.enter="doSearch" />
+            <button @click="doSearch" :disabled="searching" class="btn-primary">{{ searching ? 'Searching...' : 'Search' }}</button>
           </div>
           <div class="search-params">
-            <label class="param-label">
-              Top-K
+            <label class="param-label">Top-K
               <select v-model.number="searchTopK" class="input-dark param-select">
-                <option :value="1">1</option>
-                <option :value="3">3</option>
-                <option :value="5">5</option>
-                <option :value="10">10</option>
-                <option :value="20">20</option>
-                <option :value="50">50</option>
+                <option :value="1">1</option><option :value="3">3</option><option :value="5">5</option>
+                <option :value="10">10</option><option :value="20">20</option><option :value="50">50</option>
               </select>
             </label>
-            <label class="param-label">
-              Threshold
+            <label class="param-label">Threshold
               <select v-model.number="searchThreshold" class="input-dark param-select">
-                <option :value="0">None</option>
-                <option :value="0.3">0.3</option>
-                <option :value="0.5">0.5</option>
-                <option :value="0.7">0.7</option>
-                <option :value="0.8">0.8</option>
-                <option :value="0.9">0.9</option>
+                <option :value="0">None</option><option :value="0.3">0.3</option><option :value="0.5">0.5</option>
+                <option :value="0.7">0.7</option><option :value="0.8">0.8</option><option :value="0.9">0.9</option>
               </select>
             </label>
-            <label class="param-label">
-              KB Filter
+            <label class="param-label">KB Filter
               <select v-model.number="searchKbId" class="input-dark param-select">
                 <option :value="null">All</option>
                 <option v-for="kb in kbs" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
               </select>
             </label>
-            <label class="param-label">
-              Mode
+            <label class="param-label">Mode
               <select v-model="searchMode" class="input-dark param-select">
-                <option value="normal">Normal (SearchResult)</option>
-                <option value="raw">Raw (ChromaDB)</option>
+                <option value="normal">Normal</option><option value="raw">Raw (ChromaDB)</option>
               </select>
             </label>
-            <label class="param-label" v-if="searchResults.length > 0">
-              Sort
+            <label class="param-label" v-if="searchResults.length > 0">Sort
               <select v-model="sortField" class="input-dark param-select">
-                <option value="score">Score ↓</option>
-                <option value="distance">Distance ↑</option>
+                <option value="score">Score ↓</option><option value="distance">Distance ↑</option>
               </select>
             </label>
           </div>
         </div>
 
-        <!-- Empty -->
-        <div v-if="!searching && searchResults.length === 0 && !searchMeta" class="panel-empty" style="padding: 40px 0;">
-          Enter a query and click Search to test retrieval quality.
-        </div>
+        <div v-if="!searching && searchResults.length === 0 && !searchMeta" class="panel-empty">Enter a query and click Search to test retrieval quality.</div>
 
-        <!-- Meta bar -->
         <div v-if="searchMeta" class="search-meta-bar">
           <span>{{ searchMeta.total_results }} results</span>
           <span>top_k={{ searchMeta.top_k }}</span>
@@ -479,14 +741,13 @@ function statusClassName(key: string | number): string {
           <span class="meta-mode">{{ searchMode === 'raw' ? 'raw query' : 'normal' }}</span>
         </div>
 
-        <!-- Results -->
         <div class="search-results" v-if="sortedResults.length > 0">
           <div v-for="(r, idx) in sortedResults" :key="idx" class="search-result-item">
             <div class="sr-header">
               <span class="sr-rank">#{{ idx + 1 }}</span>
               <span class="sr-file">{{ r.filename }}</span>
               <span v-if="r.kb_name" class="sr-kb">{{ r.kb_name }}</span>
-              <span class="sr-score" :style="{color: scoreColor(r.score ?? r.cosine_similarity ?? 0)}">
+              <span class="sr-score" :style="{ color: scoreColor(r.score ?? r.cosine_similarity ?? 0) }">
                 {{ ((r.score ?? r.cosine_similarity ?? 0) * 100).toFixed(1) }}%
               </span>
               <span v-if="r.distance !== undefined" class="sr-distance">d={{ r.distance }}</span>
@@ -494,12 +755,8 @@ function statusClassName(key: string | number): string {
             <div class="sr-snippet">{{ r.snippet || r.text }}</div>
           </div>
         </div>
-
-        <!-- No results -->
-        <div v-if="!searching && searchMeta && sortedResults.length === 0" class="panel-empty" style="padding: 20px 0;">
-          No results found. Try lowering the threshold or changing the query.
-        </div>
-      </section>
+        <div v-if="!searching && searchMeta && sortedResults.length === 0" class="panel-empty">No results found. Try lowering the threshold.</div>
+      </details>
     </div>
   </div>
 </template>
@@ -514,7 +771,7 @@ function statusClassName(key: string | number): string {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-/* Top bar */
+/* ── Top bar ───────────────────────────────────── */
 .admin-top {
   display: flex; align-items: center; justify-content: space-between;
   padding: 0 32px; height: 56px;
@@ -538,14 +795,12 @@ function statusClassName(key: string | number): string {
 .btn-logout svg { width: 18px; height: 18px; }
 .btn-logout:hover { color: #f87171; }
 
-.admin-body { max-width: 1200px; margin: 0 auto; padding: 32px; }
+/* ── Body ──────────────────────────────────────── */
+.admin-body { max-width: 1440px; margin: 0 auto; padding: 24px 32px; }
 
-/* Stats */
-.stat-grid {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px;
-}
+/* ── Stats ─────────────────────────────────────── */
+.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
 @media (max-width: 900px) { .stat-grid { grid-template-columns: repeat(2, 1fr); } }
-
 .stat-card {
   background: #0f0f14; border: 1px solid rgba(255,255,255,0.04);
   border-radius: 14px; padding: 20px; display: flex; align-items: center; gap: 16px;
@@ -563,14 +818,11 @@ function statusClassName(key: string | number): string {
 .stat-value { font-size: 26px; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
 .stat-label { font-size: 12px; color: rgba(255,255,255,0.35); margin-top: 2px; }
 
-/* Status bar */
-.status-section { margin-bottom: 32px; }
+/* ── Status breakdown ──────────────────────────── */
+.status-section { margin-bottom: 24px; }
 .status-section h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: rgba(255,255,255,0.6); }
 .status-bar { display: flex; height: 32px; border-radius: 8px; overflow: hidden; gap: 2px; }
-.status-seg {
-  position: relative; display: flex; align-items: center; justify-content: center;
-  transition: filter 0.2s; min-width: 20px;
-}
+.status-seg { display: flex; align-items: center; justify-content: center; transition: filter 0.2s; min-width: 20px; }
 .status-seg:hover { filter: brightness(1.3); }
 .status-seg.submitted { background: #6366f1; }
 .status-seg.manager_approval { background: #8b5cf6; }
@@ -582,9 +834,7 @@ function statusClassName(key: string | number): string {
 .seg-label { font-size: 11px; font-weight: 600; color: #fff; }
 .status-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
 .legend-item { font-size: 12px; color: rgba(255,255,255,0.4); display: flex; align-items: center; gap: 6px; }
-.legend-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-}
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; }
 .legend-dot.submitted { background: #6366f1; }
 .legend-dot.manager_approval { background: #8b5cf6; }
 .legend-dot.finance_approval { background: #a78bfa; }
@@ -593,150 +843,340 @@ function statusClassName(key: string | number): string {
 .legend-dot.rejected { background: #f87171; }
 .legend-dot.draft { background: rgba(255,255,255,0.2); }
 
-/* Content grid */
-.content-grid { display: grid; grid-template-columns: 1fr 2fr; gap: 24px; }
-@media (max-width: 900px) { .content-grid { grid-template-columns: 1fr; } }
+/* ── Main two-column layout ────────────────────── */
+.admin-main {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+.admin-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.admin-right {
+  width: 370px;
+  min-width: 370px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
 
+/* ── Shared panel ──────────────────────────────── */
 .panel {
   background: #0f0f14; border: 1px solid rgba(255,255,255,0.04);
-  border-radius: 14px; padding: 24px;
+  border-radius: 14px; padding: 20px;
+  display: flex; flex-direction: column; gap: 12px;
 }
-.panel h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; color: #fff; }
-.panel-desc { font-size: 12px; color: rgba(255,255,255,0.3); margin-bottom: 16px; }
-.panel-empty { font-size: 13px; color: rgba(255,255,255,0.2); padding: 20px 0; text-align: center; }
+.panel h3 { font-size: 14px; font-weight: 600; color: #fff; margin: 0; }
+.panel h4 { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.4); text-transform: uppercase; letter-spacing: 0.5px; }
+.panel-empty {
+  font-size: 12px; color: rgba(255,255,255,0.2); text-align: center; padding: 16px 0;
+}
 
-.kb-create { display: flex; flex-direction: column; gap: 10px; }
+/* ── Left: Policy Center header ────────────────── */
+.left-section-header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
+}
+.left-section-header h2 {
+  font-size: 16px; font-weight: 600; color: #fff; margin: 0;
+}
+
+/* ── Policy List ───────────────────────────────── */
+.policy-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.policy-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-radius: 10px; cursor: pointer;
+  transition: background 0.15s;
+}
+.policy-item:hover { background: rgba(255,255,255,0.03); }
+.policy-item.active { background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.2); }
+.policy-name { font-size: 13px; font-weight: 500; color: #e4e4e7; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.policy-loading { font-size: 12px; color: rgba(255,255,255,0.2); padding: 12px 0; }
+
+.status-badge {
+  font-size: 10px; padding: 2px 8px; border-radius: 6px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap;
+}
+.status-badge.draft { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.35); }
+.status-badge.published { background: rgba(52,211,153,0.12); color: #34d399; }
+.status-badge.archived { background: rgba(248,113,113,0.1); color: #fca5a5; }
+.status-badge.normalized { background: rgba(99,102,241,0.12); color: #a5b4fc; }
+.status-badge.reviewing { background: rgba(251,191,36,0.12); color: #fbbf24; }
+.status-badge.parsing { background: rgba(99,102,241,0.08); color: #a5b4fc; }
+
+/* ── Error bar ─────────────────────────────────── */
+.error-bar {
+  background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.2);
+  border-radius: 10px; padding: 10px 16px; font-size: 13px; color: #fca5a5;
+}
+
+/* ── Upload Zone ──────────────────────────────── */
+.upload-zone { max-width: 480px; margin: 20px auto; text-align: center; }
+.upload-zone h3 { font-size: 16px; font-weight: 600; color: #fff; margin-bottom: 8px; }
+.upload-desc { font-size: 13px; color: rgba(255,255,255,0.3); margin-bottom: 20px; line-height: 1.6; }
+.upload-drop {
+  border: 2px dashed rgba(255,255,255,0.08); border-radius: 14px;
+  padding: 40px 20px; margin-bottom: 16px; cursor: pointer; transition: border-color 0.2s;
+}
+.upload-drop:hover { border-color: rgba(99,102,241,0.3); }
+.upload-drop p { font-size: 13px; color: rgba(255,255,255,0.2); margin-top: 8px; }
+.upload-icon { width: 36px; height: 36px; color: rgba(255,255,255,0.15); }
+.upload-row { display: flex; gap: 10px; align-items: center; justify-content: center; }
+.file-label { cursor: pointer; display: inline-block; flex-shrink: 0; }
+.upload-status { margin-top: 14px; font-size: 13px; color: rgba(99,102,241,0.6); }
+
+/* ── Upload Summary ────────────────────────────── */
+.upload-summary {
+  background: linear-gradient(135deg, rgba(99,102,241,0.06), rgba(139,92,246,0.04));
+  border: 1px solid rgba(99,102,241,0.12); border-radius: 12px; padding: 14px 18px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.summary-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.summary-icon { font-size: 14px; }
+.summary-label { font-size: 13px; font-weight: 600; color: #c4b5fd; min-width: 80px; }
+.summary-detail { font-size: 12px; color: rgba(255,255,255,0.4); }
+.warn-inline { color: #fbbf24; }
+
+/* ── Version tabs ──────────────────────────────── */
+.version-area { display: flex; flex-direction: column; gap: 14px; }
+.version-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.tab {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 12px; border-radius: 8px; font-size: 13px; cursor: pointer;
+  border: 1px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.02);
+  color: rgba(255,255,255,0.4); transition: all 0.15s;
+}
+.tab:hover { background: rgba(255,255,255,0.04); color: #e4e4e7; }
+.tab.active { background: rgba(99,102,241,0.1); border-color: rgba(99,102,241,0.2); color: #a5b4fc; }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.status-dot.draft { background: rgba(255,255,255,0.3); }
+.status-dot.published { background: #34d399; }
+.status-dot.archived { background: #f87171; }
+.status-dot.normalized { background: #6366f1; }
+.status-dot.reviewing { background: #fbbf24; }
+.status-dot.parsing { background: rgba(255,255,255,0.2); }
+
+/* ── Draft editor ──────────────────────────────── */
+.draft-editor { display: flex; flex-direction: column; gap: 14px; }
+.section-title { font-size: 15px; font-weight: 600; color: #fff; }
+.warnings { display: flex; flex-direction: column; gap: 4px; }
+.warn-item { font-size: 12px; color: #fbbf24; padding: 6px 10px; background: rgba(251,191,36,0.08); border-radius: 8px; }
+
+.expense-card {
+  background: #0f0f14; border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px; padding: 16px;
+}
+.card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.card-name { font-size: 14px; font-weight: 600; color: #e4e4e7; }
+.card-code { font-size: 12px; color: rgba(255,255,255,0.3); margin-left: 6px; }
+.confidence { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 6px; }
+.confidence.high { background: rgba(52,211,153,0.12); color: #34d399; }
+.confidence.medium { background: rgba(251,191,36,0.12); color: #fbbf24; }
+.confidence.low { background: rgba(248,113,113,0.12); color: #fca5a5; }
+
+.card-fields { display: flex; flex-wrap: wrap; gap: 10px; }
+.field { font-size: 12px; color: rgba(255,255,255,0.4); display: flex; flex-direction: column; gap: 4px; }
+.field-input { width: 130px; }
+.checkbox-field { flex-direction: row; align-items: center; gap: 6px; cursor: pointer; color: rgba(255,255,255,0.5); }
+.checkbox-field input[type="checkbox"] { accent-color: #6366f1; }
+.card-source { margin-top: 8px; font-size: 11px; color: rgba(255,255,255,0.25); }
+.source-label { color: rgba(255,255,255,0.15); }
+.editor-actions { display: flex; gap: 10px; margin-top: 4px; }
+
+/* ── Buttons & Inputs ──────────────────────────── */
+.btn-primary {
+  padding: 9px 16px; background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff; border: none; border-radius: 10px; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: box-shadow 0.2s;
+}
+.btn-primary:hover { box-shadow: 0 4px 16px rgba(99,102,241,0.3); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-upload { padding: 8px 14px; font-size: 12px; }
+
+.btn-secondary {
+  padding: 9px 16px; border-radius: 10px; font-size: 13px; font-weight: 500;
+  cursor: pointer; border: 1px solid rgba(99,102,241,0.2);
+  background: rgba(99,102,241,0.08); color: #a5b4fc; transition: all 0.15s;
+}
+.btn-secondary:hover { background: rgba(99,102,241,0.15); }
+.btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-publish {
+  padding: 9px 20px; background: linear-gradient(135deg, #34d399, #10b981);
+  color: #fff; border: none; border-radius: 10px; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: box-shadow 0.2s;
+}
+.btn-publish:hover { box-shadow: 0 4px 16px rgba(52,211,153,0.3); }
+.btn-publish:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-sm {
+  padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: 500;
+  cursor: pointer; border: none; transition: all 0.15s;
+  background: rgba(99,102,241,0.1); color: #a5b4fc; display: inline-flex; align-items: center;
+}
+.btn-sm:hover { background: rgba(99,102,241,0.2); }
+
+.btn-danger { background: rgba(248,113,113,0.1); color: #fca5a5; }
+.btn-danger:hover { background: rgba(248,113,113,0.2); }
+.btn-upload-kb { font-size: 14px; padding: 4px 10px; }
+.btn-chroma { width: 100%; justify-content: center; }
+
 .input-dark {
-  width: 100%; padding: 10px 14px;
+  padding: 9px 14px;
   background: #18181b; border: 1px solid rgba(255,255,255,0.06);
   border-radius: 10px; color: #fff; font-size: 13px; outline: none;
   transition: border-color 0.2s;
 }
 .input-dark:focus { border-color: rgba(99,102,241,0.4); }
 .input-dark::placeholder { color: rgba(255,255,255,0.15); }
-.btn-primary {
-  padding: 10px 16px; background: linear-gradient(135deg, #6366f1, #8b5cf6);
-  color: #fff; border: none; border-radius: 10px; font-size: 13px; font-weight: 600;
-  cursor: pointer; transition: box-shadow 0.2s;
+
+/* ── JSON preview ──────────────────────────────── */
+.json-preview {
+  background: #0f0f14; border: 1px solid rgba(255,255,255,0.04);
+  border-radius: 12px; padding: 14px;
 }
-.btn-primary:hover { box-shadow: 0 4px 16px rgba(99,102,241,0.3); }
+.json-preview summary {
+  font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.5); cursor: pointer;
+  margin-bottom: 10px;
+}
+.json-preview pre {
+  font-size: 11px; color: rgba(255,255,255,0.4); max-height: 350px; overflow: auto;
+  font-family: 'Consolas', 'Courier New', monospace; white-space: pre-wrap;
+  background: #18181b; border-radius: 8px; padding: 12px;
+}
+
+/* ── Publish ───────────────────────────────────── */
+.publish-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  background: rgba(52,211,153,0.06); border: 1px solid rgba(52,211,153,0.12);
+  border-radius: 12px; padding: 14px 18px;
+}
+.publish-bar p { font-size: 13px; color: rgba(255,255,255,0.4); }
+.published-badge {
+  font-size: 13px; color: #34d399; padding: 10px 14px;
+  background: rgba(52,211,153,0.06); border-radius: 10px;
+}
+
+/* ── Right: KB current ─────────────────────────── */
+.kb-meta-row { display: flex; gap: 6px; }
+.kb-meta-tag {
+  font-size: 10px; padding: 2px 8px; border-radius: 5px; font-weight: 500;
+  background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.3);
+}
+.tag-active { background: rgba(52,211,153,0.1); color: #34d399; }
+.tag-inactive { background: rgba(248,113,113,0.08); color: #fca5a5; }
+.kb-desc-text { font-size: 12px; color: rgba(255,255,255,0.3); line-height: 1.5; }
+
+.kb-docs-list { display: flex; flex-direction: column; gap: 4px; }
+.kb-doc-item { }
+.kb-doc-hdr {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-radius: 8px; cursor: pointer; transition: background 0.15s;
+}
+.kb-doc-hdr:hover { background: rgba(255,255,255,0.03); }
+.kb-doc-hdr.open { background: rgba(99,102,241,0.06); }
+.kb-doc-name { font-size: 12px; color: rgba(255,255,255,0.55); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-doc-meta { font-size: 10px; color: rgba(255,255,255,0.2); white-space: nowrap; }
+
+.kb-doc-chunks {
+  margin-left: 10px; padding-left: 10px;
+  border-left: 1px solid rgba(99,102,241,0.1);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.kb-chunk-item { display: flex; gap: 6px; font-size: 11px; padding: 3px 0; }
+.cidx { color: rgba(99,102,241,0.4); font-weight: 600; min-width: 22px; flex-shrink: 0; }
+.ctext { color: rgba(255,255,255,0.35); line-height: 1.4; word-break: break-all; }
+
+/* KB Search */
+.kb-search-box { display: flex; flex-direction: column; gap: 8px; }
+.kb-search-row { display: flex; gap: 6px; }
+.kb-search-input { flex: 1; padding: 8px 12px; font-size: 12px; }
+
+.kb-results { display: flex; flex-direction: column; gap: 6px; }
+.kb-result-item {
+  padding: 9px 12px; background: rgba(255,255,255,0.015);
+  border: 1px solid rgba(255,255,255,0.04); border-radius: 8px;
+}
+.kb-result-hdr { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+.result-rank { font-size: 10px; color: rgba(99,102,241,0.4); font-weight: 600; }
+.result-file { font-size: 11px; color: rgba(255,255,255,0.3); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-score { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.result-snippet { font-size: 11px; color: rgba(255,255,255,0.45); line-height: 1.5; }
+.search-empty { font-size: 11px; color: rgba(255,255,255,0.15); text-align: center; padding: 8px 0; }
+
+/* ── Right: All KBs ────────────────────────────── */
+.kb-create { display: flex; flex-direction: column; gap: 8px; }
+.kb-create-row { display: flex; gap: 8px; }
+.kb-create-row .input-dark { flex: 1; }
 
 .kb-row {
-  display: flex; align-items: center; gap: 16px;
-  padding: 14px 0; border-bottom: 1px solid rgba(255,255,255,0.03);
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.03); cursor: pointer;
 }
 .kb-row:last-child { border-bottom: none; }
-.kb-info { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.kb-name { font-size: 14px; font-weight: 500; color: #e4e4e7; }
-.kb-desc { font-size: 12px; color: rgba(255,255,255,0.3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.kb-meta { flex-shrink: 0; }
+.kb-row-info { flex: 1; min-width: 0; }
+.kb-row-name { font-size: 13px; font-weight: 500; color: #e4e4e7; display: block; }
+.kb-row-desc { font-size: 11px; color: rgba(255,255,255,0.25); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.kb-row-meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .kb-count {
-  font-size: 11px; padding: 3px 10px; background: rgba(255,255,255,0.03);
-  border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; color: rgba(255,255,255,0.3);
-}
-.kb-actions { display: flex; gap: 6px; flex-shrink: 0; }
-.btn-sm {
-  padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: 500;
-  cursor: pointer; border: none; transition: all 0.15s;
-  background: rgba(99,102,241,0.1); color: #a5b4fc;
-  display: inline-flex; align-items: center;
-}
-.btn-sm:hover { background: rgba(99,102,241,0.2); }
-.btn-sm.loading { opacity: 0.5; }
-.btn-danger { background: rgba(248,113,113,0.1); color: #fca5a5; }
-.btn-danger:hover { background: rgba(248,113,113,0.2); }
-
-/* Document list inside expanded KB */
-.kb-docs {
-  margin-left: 12px; border-left: 1px solid rgba(255,255,255,0.05); padding-left: 16px;
-  margin-bottom: 12px;
-}
-.doc-item { margin-bottom: 6px; }
-.doc-header {
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background 0.15s;
-}
-.doc-header:hover { background: rgba(255,255,255,0.03); }
-.doc-name { font-size: 13px; color: rgba(255,255,255,0.7); flex: 1; }
-.doc-meta { font-size: 11px; color: rgba(255,255,255,0.25); }
-.doc-expand { font-size: 11px; color: rgba(255,255,255,0.3); width: 16px; text-align: center; }
-
-/* Chunk display */
-.doc-chunks {
-  margin-left: 20px; margin-top: 4px;
-  border-left: 1px solid rgba(99,102,241,0.15); padding-left: 12px;
-}
-.chunk-item {
-  display: flex; align-items: flex-start; gap: 8px;
-  padding: 6px 0; font-size: 12px;
-}
-.chunk-idx {
-  color: rgba(99,102,241,0.6); font-weight: 600; min-width: 28px; flex-shrink: 0;
-}
-.chunk-text {
-  color: rgba(255,255,255,0.5); flex: 1; word-break: break-all; line-height: 1.4;
-}
-.chunk-len {
-  color: rgba(255,255,255,0.2); font-size: 10px; flex-shrink: 0; min-width: 30px; text-align: right;
+  font-size: 10px; padding: 2px 8px; background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; color: rgba(255,255,255,0.3);
 }
 
-/* Search Debug Panel */
-.search-controls {
-  display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px;
+/* Expanded KB docs */
+.kb-expanded-docs {
+  margin-left: 10px; border-left: 1px solid rgba(255,255,255,0.05); padding-left: 14px;
+  margin-bottom: 8px;
 }
-.search-row {
-  display: flex; gap: 10px;
+.kb-exp-doc { margin-bottom: 4px; }
+.kb-exp-doc-hdr {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-radius: 8px; cursor: pointer; transition: background 0.15s;
 }
-.search-params {
-  display: flex; gap: 12px; flex-wrap: wrap;
+.kb-exp-doc-hdr:hover { background: rgba(255,255,255,0.03); }
+.doc-expand-icon { font-size: 10px; color: rgba(255,255,255,0.25); width: 14px; text-align: center; }
+
+/* ── Search Debug (collapsible) ─────────────────── */
+.search-debug-panel {
+  margin-top: 24px;
+  background: #0f0f14; border: 1px solid rgba(255,255,255,0.04);
+  border-radius: 14px; padding: 16px 20px;
 }
+.search-debug-panel summary {
+  font-size: 14px; font-weight: 600; color: rgba(255,255,255,0.4); cursor: pointer;
+  outline: none;
+}
+.debug-sub { font-size: 11px; font-weight: 400; color: rgba(255,255,255,0.2); margin-left: 8px; }
+
+.search-controls { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.search-row { display: flex; gap: 10px; }
+.search-params { display: flex; gap: 12px; flex-wrap: wrap; }
 .param-label {
   display: flex; align-items: center; gap: 6px;
   font-size: 12px; color: rgba(255,255,255,0.4);
 }
-.param-select {
-  width: auto; padding: 6px 10px; font-size: 12px;
-}
+.param-select { width: auto; padding: 6px 10px; font-size: 12px; }
 .search-meta-bar {
   display: flex; gap: 16px; flex-wrap: wrap;
-  padding: 8px 12px; margin-bottom: 12px;
+  padding: 8px 12px; margin-top: 8px;
   background: rgba(255,255,255,0.02); border-radius: 8px;
   font-size: 12px; color: rgba(255,255,255,0.3);
 }
-.meta-mode {
-  margin-left: auto; color: rgba(99,102,241,0.6); font-weight: 500;
-}
-.search-results {
-  display: flex; flex-direction: column; gap: 8px;
-}
+.meta-mode { margin-left: auto; color: rgba(99,102,241,0.6); font-weight: 500; }
+.search-results { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .search-result-item {
   padding: 12px 14px;
   background: rgba(255,255,255,0.015); border: 1px solid rgba(255,255,255,0.04);
-  border-radius: 10px; transition: background 0.15s;
+  border-radius: 10px;
 }
-.search-result-item:hover { background: rgba(255,255,255,0.03); }
-.sr-header {
-  display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
-}
-.sr-rank {
-  font-size: 11px; color: rgba(99,102,241,0.5); font-weight: 600; min-width: 24px;
-}
-.sr-file {
-  font-size: 13px; color: #e4e4e7; font-weight: 500; flex: 1;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.sr-kb {
-  font-size: 11px; color: rgba(255,255,255,0.25);
-  padding: 2px 8px; background: rgba(255,255,255,0.03); border-radius: 6px;
-}
-.sr-score {
-  font-size: 14px; font-weight: 700; min-width: 52px; text-align: right; font-variant-numeric: tabular-nums;
-}
-.sr-distance {
-  font-size: 11px; color: rgba(255,255,255,0.2); min-width: 64px; text-align: right; font-variant-numeric: tabular-nums;
-}
-.sr-snippet {
-  font-size: 12px; color: rgba(255,255,255,0.5); line-height: 1.5;
-  padding-left: 24px; word-break: break-word;
-}
+.sr-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.sr-rank { font-size: 11px; color: rgba(99,102,241,0.5); font-weight: 600; min-width: 24px; }
+.sr-file { font-size: 13px; color: #e4e4e7; font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-kb { font-size: 11px; color: rgba(255,255,255,0.25); padding: 2px 8px; background: rgba(255,255,255,0.03); border-radius: 6px; }
+.sr-score { font-size: 14px; font-weight: 700; min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+.sr-distance { font-size: 11px; color: rgba(255,255,255,0.2); min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
+.sr-snippet { font-size: 12px; color: rgba(255,255,255,0.5); line-height: 1.5; padding-left: 24px; word-break: break-word; }
 </style>
