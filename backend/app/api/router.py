@@ -8,6 +8,7 @@ from app.api.employees import router as employees_router
 from app.api.expenses import router as expenses_router
 from app.api.reimbursements import router as reimbursements_router
 from app.api.admin import router as admin_router
+from app.api.policy import router as policy_router
 
 api_router = APIRouter()
 
@@ -18,6 +19,7 @@ api_router.include_router(employees_router)
 api_router.include_router(expenses_router)
 api_router.include_router(reimbursements_router)
 api_router.include_router(admin_router)
+api_router.include_router(policy_router)
 
 
 @api_router.get("/health")

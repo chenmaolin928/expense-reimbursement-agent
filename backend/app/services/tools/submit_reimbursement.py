@@ -32,6 +32,20 @@ class SubmitReimbursementTool(BaseTool):
         ctx = get_tool_context()
         employee_id = ctx.employee_id
 
+        # ---- RuleEngine validation ----
+        if ctx.rule_engine is not None:
+            rule_result = ctx.rule_engine.evaluate(category, amount)
+            if not rule_result.can_submit:
+                return {"error": rule_result.reason}
+            # Note: need_approval/need_guest_list/need_attachment are informational;
+            # we still allow submission but the UI can surface these flags.
+            if rule_result.need_approval:
+                note = (note + " " if note else "") + "[需审批]"
+            if rule_result.need_guest_list:
+                note = (note + " " if note else "") + "[需宾客名单]"
+            if rule_result.need_attachment:
+                note = (note + " " if note else "") + "[需附件]"
+
         db = SessionLocal()
         try:
             if not employee_id:

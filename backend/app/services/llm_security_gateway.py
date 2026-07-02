@@ -134,6 +134,31 @@ class LLMSecurityGateway:
         """记录安全审计日志。"""
         logger.info(f"[Gateway.Audit] session={self.session_id} event={event} detail={detail}")
 
+    # ---- 引擎上下文（Policy/Caculator/Rule Engine 结果的安全摘要） ----
+
+    def build_engine_context(self, calc_result: dict | None = None, rule_result: dict | None = None) -> dict:
+        """Build a safe context dict from engine results.
+
+        Only passes verdict, summary, final_amount, need_approval — never
+        raw policy data, internal IDs, or PII.
+        """
+        ctx: dict = {}
+        if calc_result:
+            ctx["verdict"] = calc_result.get("verdict", "unknown")
+            ctx["summary"] = calc_result.get("summary", "")
+            ctx["breakdown"] = calc_result.get("breakdown", {})
+            ctx["final_amount"] = calc_result.get("breakdown", {}).get("final_amount", 0)
+        if rule_result:
+            ctx["need_approval"] = rule_result.get("need_approval", False)
+            ctx["need_guest_list"] = rule_result.get("need_guest_list", False)
+            ctx["need_attachment"] = rule_result.get("need_attachment", False)
+            ctx["can_submit"] = rule_result.get("can_submit", True)
+
+        if calc_result or rule_result:
+            self.audit_log("engine_context", {"calc_keys": list(ctx.keys())})
+
+        return ctx
+
     # ================================================================
     # Private sanitizers
     # ================================================================

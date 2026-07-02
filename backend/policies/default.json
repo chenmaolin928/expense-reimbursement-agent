@@ -1,0 +1,67 @@
+{
+  "version": "1.0",
+  "enterprise": "default",
+  "description": "默认企业报销政策 — 从 agent_service._extract_policy_limits() 硬编码值迁移",
+  "expense_types": [
+    {
+      "code": "meals",
+      "name": "餐饮",
+      "reimbursement_ratio": 0.6,
+      "limit_per_person": null,
+      "cap": 500,
+      "approval_over": 0,
+      "need_guest": false,
+      "need_invoice": true,
+      "need_attachment": false,
+      "enabled": true
+    },
+    {
+      "code": "travel",
+      "name": "差旅",
+      "reimbursement_ratio": 0.8,
+      "limit_per_person": null,
+      "cap": 500,
+      "approval_over": 0,
+      "need_guest": false,
+      "need_invoice": true,
+      "need_attachment": false,
+      "enabled": true
+    },
+    {
+      "code": "transportation",
+      "name": "交通",
+      "reimbursement_ratio": 0.8,
+      "limit_per_person": null,
+      "cap": 200,
+      "approval_over": 0,
+      "need_guest": false,
+      "need_invoice": true,
+      "need_attachment": false,
+      "enabled": true
+    },
+    {
+      "code": "office_supplies",
+      "name": "办公用品",
+      "reimbursement_ratio": 0.8,
+      "limit_per_person": null,
+      "cap": 500,
+      "approval_over": 0,
+      "need_guest": false,
+      "need_invoice": true,
+      "need_attachment": false,
+      "enabled": true
+    },
+    {
+      "code": "entertainment",
+      "name": "商务招待",
+      "reimbursement_ratio": 0.8,
+      "limit_per_person": null,
+      "cap": 1000,
+      "approval_over": 1000,
+      "need_guest": true,
+      "need_invoice": true,
+      "need_attachment": true,
+      "enabled": true
+    }
+  ]
+}

@@ -19,6 +19,7 @@ class ToolContext(BaseModel):
     employee_id: int | None = None
     user_email: str | None = None
     security_gateway: Any | None = None  # LLMSecurityGateway reference
+    rule_engine: Any | None = None  # RuleEngine reference
 
     class Config:
         arbitrary_types_allowed = True
@@ -43,6 +44,7 @@ def get_tool_context() -> ToolContext:
         employee_id=_registry.get("employee_id"),
         user_email=_registry.get("user_email"),
         security_gateway=_registry.get("security_gateway"),
+        rule_engine=_registry.get("rule_engine"),
     )
 
 

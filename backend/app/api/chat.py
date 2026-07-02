@@ -247,6 +247,17 @@ async def chat(
     from app.services.llm_security_gateway import LLMSecurityGateway
     gateway = LLMSecurityGateway(db, req.session_id)
 
+    # ---- Engines (Cloud Brain, Local Hands) ----
+    from app.services.policy_repository import PolicyRepository
+    from app.engines.policy_engine import PolicyEngine
+    from app.engines.calculator_engine import CalculatorEngine
+    from app.engines.rule_engine import RuleEngine
+
+    repo = PolicyRepository(settings.policy.policies_dir)
+    policy_engine = PolicyEngine(repo)
+    calculator_engine = CalculatorEngine(policy_engine)
+    rule_engine = RuleEngine(policy_engine)
+
     # 用户消息：原文存 DB 供前端展示，清洗版送 LLM
     clean_message = gateway.build_user_message(req.message)
     gateway.audit_log("user_message", {"raw_len": len(req.message), "clean_len": len(clean_message)})
@@ -280,6 +291,9 @@ async def chat(
                 user_email=email,
                 message_history=history,
                 security_gateway=gateway,
+                policy_engine=policy_engine,
+                calculator_engine=calculator_engine,
+                rule_engine=rule_engine,
             )
 
             assistant_content = ""

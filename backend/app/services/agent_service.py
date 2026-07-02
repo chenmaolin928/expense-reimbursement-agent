@@ -356,6 +356,9 @@ async def run_agent(
     user_email: str | None,
     message_history: list[dict] | None = None,
     security_gateway: object | None = None,
+    policy_engine: object | None = None,
+    calculator_engine: object | None = None,
+    rule_engine: object | None = None,
 ) -> list[dict]:
     """Run the PAO agent and return SSE events.
 
@@ -363,7 +366,7 @@ async def run_agent(
             done, supplement_form
     """
     set_tool_context(user_id=user_id, employee_id=employee_id, user_email=user_email,
-                     security_gateway=security_gateway)
+                     security_gateway=security_gateway, rule_engine=rule_engine)
 
     agent = get_agent()
     input_messages: list = []
@@ -450,7 +453,9 @@ async def run_agent(
                     if last_invoice_result:
                         # Scenario A: Reimbursement flow — has invoice + policy search
                         # Emit policy_card with judgment + confirmation_request
-                        judgment = _synthesize_policy_judgment(last_invoice_result, last_search_result)
+                        judgment = _synthesize_policy_judgment(
+                            last_invoice_result, last_search_result, calculator=calculator_engine
+                        )
                         card = build_policy_card(last_search_result, judgment)
                         events.append(card)
                         verdict = card["data"].get("verdict", "in_scope")
@@ -589,12 +594,80 @@ def _extract_policy_refs(search_result: dict) -> list[dict]:
     return refs
 
 
-def _synthesize_policy_judgment(invoice_result: dict, search_result: dict) -> dict:
+def _synthesize_policy_judgment(
+    invoice_result: dict,
+    search_result: dict,
+    calculator: object | None = None,
+) -> dict:
     """Synthesize LLM judgment from invoice and policy search results.
+
+    New path (calculator present): deterministic calculation via CalculatorEngine.
+    Legacy path (calculator=None): regex-based heuristic from hardcoded limits.
 
     In mock mode or when LLM hasn't explicitly judged, this provides a
     deterministic fallback based on policy snippet matching.
     """
+    # ---- New path: CalculatorEngine ----
+    if calculator is not None:
+        return _synthesize_with_calculator(invoice_result, search_result, calculator)
+
+    # ---- Legacy path (backward compatible) ----
+    return _legacy_policy_judgment(invoice_result, search_result)
+
+
+def _synthesize_with_calculator(
+    invoice_result: dict,
+    search_result: dict,
+    calculator: object,
+) -> dict:
+    """Use CalculatorEngine for deterministic policy judgment."""
+    category_raw = invoice_result.get("category_raw", "other")
+    amount = invoice_result.get("amount", 0)
+
+    calc = calculator.calculate(category_raw, amount)
+
+    if calc.verdict == "out_of_scope":
+        return {
+            "verdict": "out_of_scope",
+            "summary": f"该发票品类（{category_raw}）不在公司报销范围内。",
+            "breakdown": None,
+        }
+
+    cap = calc.cap
+    ratio = calc.reimbursement_ratio
+    calculated = calc.calculated_amount
+    final_amount = calc.final_amount
+
+    cat_label = calc.expense_type_name or category_raw
+
+    if cap and calculated > cap:
+        summary = (
+            f"{cat_label}报销：可报 {int(ratio * 100)}%，单次上限 {cap} 元。"
+            f"发票 {amount} 元 → 预计报销 {final_amount} 元。"
+        )
+    elif ratio:
+        summary = (
+            f"{cat_label}报销：可报 {int(ratio * 100)}%。"
+            f"发票 {amount} 元 → 预计报销 {calculated} 元。"
+        )
+    else:
+        summary = f"{cat_label}在报销范围内。发票 {amount} 元，请确认是否提交报销。"
+
+    return {
+        "verdict": calc.verdict,
+        "summary": summary,
+        "breakdown": {
+            "invoice_amount": amount,
+            "reimbursement_rate": ratio,
+            "calculated_amount": calculated,
+            "cap": cap,
+            "final_amount": final_amount,
+        },
+    }
+
+
+def _legacy_policy_judgment(invoice_result: dict, search_result: dict) -> dict:
+    """Legacy fallback: regex-based judgment from hardcoded limits."""
     results = search_result.get("results", [])
     category_raw = invoice_result.get("category_raw", "other")
     amount = invoice_result.get("amount", 0)

@@ -30,10 +30,6 @@ class DeepSeekSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     api_key: str = Field(default="", alias="deepseek_api_key")
     model: str = Field(default="deepseek-chat", alias="deepseek_model")
-class DeepSeekSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-    api_key: str = Field(default="", alias="deepseek_api_key")
-    model: str = Field(default="deepseek-chat", alias="deepseek_model")
     base_url: str = Field(default="https://api.deepseek.com/v1", alias="deepseek_base_url")
 
 
@@ -70,6 +66,11 @@ class FileStorageSettings(BaseSettings):
     invoice_storage_path: str = Field(default="./data/invoices", alias="invoice_storage_path")
 
 
+class PolicySettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    policies_dir: str = Field(default="./policies", alias="policy_policies_dir")
+
+
 # ---------------------------------------------------------------------------
 # Root settings — combines all groups
 # ---------------------------------------------------------------------------
@@ -89,6 +90,7 @@ class Settings(BaseSettings):
     agent: AgentSettings = AgentSettings()
     pii: PIISettings = PIISettings()
     storage: FileStorageSettings = FileStorageSettings()
+    policy: PolicySettings = PolicySettings()
 
 
 settings = Settings()

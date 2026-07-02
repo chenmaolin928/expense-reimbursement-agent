@@ -77,6 +77,58 @@ async function chromaStats() {
   alert(JSON.stringify(res.data, null, 2))
 }
 
+// ---- Policy Center ----
+const policyText = ref('')
+const parsedPolicy = ref<any>(null)
+const parseWarnings = ref<string[]>([])
+const parsing = ref(false)
+const saving = ref(false)
+const currentPolicy = ref<any>(null)
+const policyLoading = ref(false)
+
+async function parsePolicy() {
+  if (!policyText.value.trim()) return
+  parsing.value = true
+  parseWarnings.value = []
+  try {
+    const res = await api.post('/policy/parse', { text: policyText.value.trim() })
+    parsedPolicy.value = res.data.policy
+    parseWarnings.value = res.data.warnings || []
+  } catch (e: any) {
+    alert('Parse failed: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    parsing.value = false
+  }
+}
+
+async function loadCurrentPolicy() {
+  policyLoading.value = true
+  try {
+    const res = await api.get('/policy/current')
+    currentPolicy.value = res.data
+  } catch {
+    currentPolicy.value = null
+  } finally {
+    policyLoading.value = false
+  }
+}
+
+async function savePolicy() {
+  if (!parsedPolicy.value) return
+  saving.value = true
+  try {
+    const res = await api.put('/policy/current', { enterprise: 'default', policy: parsedPolicy.value })
+    currentPolicy.value = res.data
+    alert('政策保存成功！')
+  } catch (e: any) {
+    alert('Save failed: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    saving.value = false
+  }
+}
+
+function policyJson(v: any) { return JSON.stringify(v, null, 2) }
+
 async function doSearch() {
   if (!searchQuery.value.trim()) return
   searching.value = true
@@ -282,6 +334,65 @@ function statusClassName(key: string | number): string {
                 </div>
               </div>
             </div>
+          </div>
+        </section>
+
+        <!-- Policy Center -->
+        <section class="panel" style="margin-top: 24px;">
+          <h3>⚙️ Policy Center</h3>
+          <p class="panel-desc">Upload policy text → AI parses it into structured rules → review & save to repository.</p>
+
+          <div style="margin-bottom:16px;">
+            <textarea
+              v-model="policyText"
+              placeholder="Paste company reimbursement policy text here (Chinese)... e.g. &#10;餐饮费报销标准：按实际消费金额的60%报销，单次上限500元。&#10;差旅费报销标准：按实际消费金额的80%报销，单次上限500元。&#10;商务招待费报销标准：按实际消费金额的80%报销，单次上限1000元，超过1000元需审批，需提供宾客名单。"
+              class="input-dark"
+              style="height:120px; font-family:inherit; resize:vertical;"
+            />
+          </div>
+
+          <div style="display:flex; gap:10px; margin-bottom:16px;">
+            <button @click="parsePolicy" :disabled="parsing" class="btn-primary">
+              {{ parsing ? 'Parsing...' : '🤖 AI Parse' }}
+            </button>
+            <button @click="loadCurrentPolicy" :disabled="policyLoading" class="btn-sm">
+              {{ policyLoading ? 'Loading...' : '📋 Load Current' }}
+            </button>
+            <button
+              v-if="parsedPolicy"
+              @click="savePolicy"
+              :disabled="saving"
+              class="btn-sm"
+              style="background: rgba(52,211,153,0.15); color: #34d399;"
+            >
+              {{ saving ? 'Saving...' : '💾 Save to Repository' }}
+            </button>
+          </div>
+
+          <!-- Warnings -->
+          <div v-if="parseWarnings.length > 0" style="margin-bottom:12px;">
+            <div v-for="(w, i) in parseWarnings" :key="i" style="color:#fbbf24; font-size:12px; padding:4px 0;">⚠️ {{ w }}</div>
+          </div>
+
+          <!-- Parsed JSON editor -->
+          <div v-if="parsedPolicy" style="margin-bottom:16px;">
+            <label style="font-size:12px; color:rgba(255,255,255,0.4); margin-bottom:4px; display:block;">Parsed Policy (editable JSON)</label>
+            <textarea
+              :value="policyJson(parsedPolicy)"
+              @input="(e: any) => { try { parsedPolicy = JSON.parse((e.target as HTMLTextAreaElement).value) } catch {} }"
+              class="input-dark"
+              style="height:300px; font-family:'Consolas','Courier New',monospace; font-size:12px; resize:vertical;"
+            />
+          </div>
+
+          <!-- Current active policy (read-only) -->
+          <div v-if="currentPolicy" style="margin-top:12px;">
+            <label style="font-size:12px; color:rgba(255,255,255,0.4); margin-bottom:4px; display:block;">📦 Active Policy (read-only)</label>
+            <pre style="
+              background:#18181b; border:1px solid rgba(255,255,255,0.06); border-radius:10px;
+              padding:14px; font-size:12px; color: rgba(255,255,255,0.5);
+              max-height:200px; overflow:auto; white-space:pre-wrap;
+            ">{{ policyJson(currentPolicy) }}</pre>
           </div>
         </section>
       </div>
