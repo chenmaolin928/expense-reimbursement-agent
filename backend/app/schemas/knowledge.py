@@ -1,7 +1,12 @@
 """Knowledge base DTOs."""
 
+from __future__ import annotations
+
+from typing import Any, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
+
+from app.schemas.extraction import StructuredExtractionResult
 
 
 class KnowledgeBaseCreate(BaseModel):
@@ -34,7 +39,9 @@ class KnowledgeDocumentResponse(BaseModel):
     filename: str
     chunk_count: int
     created_at: datetime
-    chunks_preview: list[ChunkPreview] = []  # first 5 chunks for verification
+    chunks_preview: list[ChunkPreview] = []
+    extraction: Optional[StructuredExtractionResult] = None
+    upload_metadata: Optional[dict[str, Any]] = None
 
 
 class KnowledgeDocumentDetail(BaseModel):
@@ -45,6 +52,7 @@ class KnowledgeDocumentDetail(BaseModel):
     chunk_count: int
     created_at: datetime
     chunks_preview: list[ChunkPreview] = []  # all chunks
+    extraction: Optional[StructuredExtractionResult] = None
 
 
 class DocumentChunksResponse(BaseModel):

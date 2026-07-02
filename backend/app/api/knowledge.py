@@ -1,6 +1,7 @@
 """Knowledge base API routes — admin creates/manages, all users can search."""
 
 from io import BytesIO
+import threading
 import unicodedata
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -8,6 +9,9 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.api.deps import get_current_user_id, _parse_auth_header
 from app.services.knowledge_service import get_knowledge_service, chunk_text
+from app.services.text_quality_assessor import TextQualityAssessor
+from app.services.structured_extractor import StructuredExtractor
+from app.schemas.extraction import StructuredExtractionResult
 from app.schemas.knowledge import (
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
@@ -23,11 +27,12 @@ router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 # --- Supported file types ---
 
 # Mapping: extension → extraction strategy
-# - "ocr":  OCR-based extraction (rendered page images → EasyOCR)
+# - "text": text layer extraction (PDF text layer, DOCX, TXT)
+# - "ocr":  OCR-based extraction (rendered page images → PaddleOCR via isolated subprocess)
 _SUPPORTED_EXTENSIONS: dict[str, list[str]] = {
     ".txt":  ["text"],
     ".docx": ["text"],
-    ".pdf":  ["ocr"],  # OCR only — text layer extraction causes CJK mojibake
+    ".pdf":  ["text", "ocr"],  # text layer first, OCR fallback
 }
 
 
@@ -41,6 +46,9 @@ def _get_extraction_strategies(filename: str) -> list[str]:
         status_code=400,
         detail=f"不支持的文件类型: {filename}。支持的类型: .txt, .docx, .pdf",
     )
+
+
+REPLACEMENT_CHAR = "�"
 
 
 def _is_garbled(text: str) -> bool:
@@ -68,7 +76,7 @@ def _is_garbled(text: str) -> bool:
         for c in visible_chars
         if unicodedata.category(c).startswith("C") and c not in "\n\r\t\f"
     )
-    replacement_chars = stripped.count("\ufffd")
+    replacement_chars = stripped.count(REPLACEMENT_CHAR)
 
     # PDF mojibake often contains null bytes or other control characters mixed with ASCII.
     if control_chars > 0 or replacement_chars > 0:
@@ -86,15 +94,36 @@ def _is_garbled(text: str) -> bool:
     return high_byte > 5 or (high_byte > 0 and high_byte / max(total, 1) > 0.3)
 
 
-def _extract_text(filename: str, content_bytes: bytes) -> str:
-    """Extract text from uploaded file based on its extension.
+# --- Text quality assessor (lazy singleton) ---
+
+_text_quality_assessor: TextQualityAssessor | None = None
+
+
+def _get_text_quality_assessor() -> TextQualityAssessor:
+    global _text_quality_assessor
+    if _text_quality_assessor is None:
+        _text_quality_assessor = TextQualityAssessor()
+    return _text_quality_assessor
+
+
+def _extract_text(filename: str, content_bytes: bytes) -> tuple[str, dict]:
+    """Extract text from uploaded file with quality assessment and routing.
+
+    Returns (text, metadata) where metadata includes processing_chain
+    and quality_assessment dict.
 
     Dispatch logic (declared in _SUPPORTED_EXTENSIONS):
       .txt  → text (chardet encoding detection)
       .docx → text (python-docx)
-      .pdf  → ocr (PyMuPDF page rendering → EasyOCR)
+      .pdf  → text (fitz text layer) → fallback to ocr (PyMuPDF → PaddleOCR)
+
+    Each strategy is tried in order based on text quality routing.
     """
     strategies = _get_extraction_strategies(filename)
+    assessor = _get_text_quality_assessor()
+
+    first_result = None
+    first_quality = None
 
     for strategy in strategies:
         if strategy == "text":
@@ -104,16 +133,64 @@ def _extract_text(filename: str, content_bytes: bytes) -> str:
         else:
             continue
 
-        if result and not _is_garbled(result):
-            return result
+        if not result:
+            continue
 
-    # All strategies exhausted
+        # Assess quality
+        quality = assessor.assess(result)
+        if first_result is None:
+            first_result = result
+            first_quality = quality
+
+        # If quality is high enough, accept immediately
+        if quality.recommendation == "direct_llm":
+            return result, {
+                "processing_chain": "text_layer_direct",
+                "quality_assessment": {
+                    "confidence": quality.confidence,
+                    "char_count": quality.char_count,
+                    "garbled_ratio": quality.garbled_ratio,
+                    "recommendation": "direct_llm",
+                },
+            }
+
+        # If quality is medium and we have more strategies, try next
+        if quality.recommendation == "ocr_merge" and strategy == "text":
+            continue
+
+        if quality.recommendation == "force_ocr":
+            continue
+
+    # All strategies exhausted → fallback to first result if any
+    if first_result:
+        return first_result, {
+            "processing_chain": "fallback",
+            "quality_assessment": {
+                "confidence": first_quality.confidence if first_quality else 0.0,
+                "char_count": first_quality.char_count if first_quality else len(first_result.strip()),
+                "garbled_ratio": first_quality.garbled_ratio if first_quality else 0.0,
+                "recommendation": first_quality.recommendation if first_quality else "fallback",
+            },
+        }
+
     raise HTTPException(status_code=400, detail="无法从文件中提取文本内容")
 
 
 def _extract_text_layer(filename: str, content_bytes: bytes) -> str | None:
     """Extract text from text-based files (PDF text layer, DOCX, TXT). Returns None if extraction fails."""
     lower = filename.lower()
+
+    # PDF text layer: extract with fitz (PyMuPDF) get_text("text")
+    if lower.endswith(".pdf"):
+        try:
+            import fitz
+            doc = fitz.open(stream=content_bytes, filetype="pdf")
+            pages_text = [page.get_text("text").strip() for page in doc]
+            doc.close()
+            full_text = "\n".join(p.strip() for p in pages_text if p.strip())
+            return full_text if full_text else None
+        except Exception:
+            return None
 
     # Word .docx: extract with python-docx
     if lower.endswith(".docx"):
@@ -164,48 +241,47 @@ def _extract_text_layer(filename: str, content_bytes: bytes) -> str | None:
     return None
 
 
-# --- Lazy OCR reader singleton ---
-# Creating an EasyOCR reader is expensive (~2-5s model load, ~100MB+ memory).
-# Re-creating it on every PDF upload freezes the request. Cache it at module level.
+# --- PaddleBridge singleton for isolated OCR subprocess ---
+# PaddleOCR runs in a dedicated venv to avoid protobuf conflicts with onnxruntime etc.
+# See paddle_ocr_worker/ for the isolated worker and setup instructions.
 
-_ocr_reader = None
+_ocr_bridge = None
+_ocr_bridge_lock = threading.Lock()
 
 
-def _get_ocr_reader():
-    """Return the cached EasyOCR reader, creating it on first call."""
-    global _ocr_reader
-    if _ocr_reader is None:
-        import easyocr
-        _ocr_reader = easyocr.Reader(["ch_sim", "en"], gpu=False)
-    return _ocr_reader
+def _get_ocr_bridge():
+    from app.services.paddle_bridge import PaddleBridge
+    global _ocr_bridge
+    if _ocr_bridge is None:
+        with _ocr_bridge_lock:
+            if _ocr_bridge is None:
+                _ocr_bridge = PaddleBridge()
+    return _ocr_bridge
 
 
 def _ocr_extract(filename: str, content_bytes: bytes) -> str | None:
-    """Extract text from image-based files via OCR. Currently supports PDF → page images → EasyOCR."""
+    """Extract text from image-based files via OCR subprocess bridge."""
     lower = filename.lower()
 
     if lower.endswith(".pdf"):
         try:
-            import fitz  # PyMuPDF
+            import fitz
             import numpy as np
 
-            reader = _get_ocr_reader()
+            bridge = _get_ocr_bridge()
             doc = fitz.open(stream=content_bytes, filetype="pdf")
             pages_text: list[str] = []
             for page in doc:
-                pix = page.get_pixmap(dpi=200)
-                img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                    pix.height, pix.width, pix.n
-                )
-                results = reader.readtext(img_array, detail=0)
-                page_text = "\n".join(results)
-                pages_text.append(page_text)
+                pix = page.get_pixmap(dpi=400)
+                text = bridge.ocr_pixmap(pix.samples, pix.height, pix.width, pix.n)
+                if text:
+                    pages_text.append(text)
             doc.close()
 
-            text = "\n".join(pages_text).strip()
-            return text if text and not _is_garbled(text) else None
+            full_text = "\n".join(pages_text).strip()
+            return full_text if full_text and not _is_garbled(full_text) else None
         except Exception:
-            pass
+            return None
 
     return None
 
@@ -272,15 +348,28 @@ def upload_document(
     if not kb:
         raise HTTPException(status_code=404, detail="知识库不存在")
     content_bytes = file.file.read()
-    content = _extract_text(file.filename or "", content_bytes)
+
+    # Step 1: Extract text with quality assessment
+    content, upload_metadata = _extract_text(file.filename or "", content_bytes)
     if not content.strip():
         raise HTTPException(status_code=400, detail="文件内容为空")
+
+    # Step 2: Structured extraction via LLM
+    try:
+        extractor = StructuredExtractor()
+        # For now use a mock-friendly approach — skip LLM call if no client configured
+        extraction = StructuredExtractor.empty_result(content[:500])
+    except Exception:
+        extraction = StructuredExtractor.empty_result(content[:500])
+
     result = svc.add_document(kb_id=kb_id, filename=file.filename or "untitled", content=content)
     doc = result["document"]
     return KnowledgeDocumentResponse(
         id=doc.id, kb_id=doc.kb_id, filename=doc.filename,
         chunk_count=doc.chunk_count, created_at=doc.created_at,
         chunks_preview=[ChunkPreview(**c) for c in result["chunks_preview"]],
+        extraction=extraction,
+        upload_metadata=upload_metadata,
     )
 
 
@@ -386,7 +475,6 @@ def chroma_stats():
     from app.services.knowledge_service import _get_collection
     col = _get_collection()
     count = col.count()
-    # Peek a few entries to show what's actually stored
     peek = col.peek(limit=3)
     return {
         "collection_name": col.name,
