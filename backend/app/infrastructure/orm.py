@@ -5,7 +5,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Column, Integer, String, Text, Float, Boolean, DateTime, Date,
-    ForeignKey, JSON, Enum as SAEnum,
+    ForeignKey, JSON, Enum as SAEnum, func,
 )
 from sqlalchemy.orm import relationship
 
@@ -13,7 +13,7 @@ from app.database import Base
 from app.domain.enums import (
     UserRole, ReportStatus, ExpenseCategory,
     DecisionStatus, ExecutionStatus, NotificationEvent,
-    PolicyStatus,
+    PolicyStatus, SUB_STATUS_DRAFTING,
 )
 
 
@@ -92,6 +92,7 @@ class KnowledgeBase(Base):
     description = Column(Text, default="")
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     is_active = Column(Boolean, default=True)
+    deactivated_at = Column(DateTime, nullable=True)  # 软删除时间戳
     created_at = Column(DateTime, default=datetime.utcnow)
 
     policy_version_id = Column(Integer, ForeignKey("policy_versions.id"), nullable=True)
@@ -217,6 +218,8 @@ class PolicyVersion(Base):
     pdf_path = Column(String(500), nullable=True)
     pdf_content = Column(Text, nullable=True)  # extracted text
     kb_id = Column(Integer, ForeignKey("knowledge_bases.id"), nullable=True)
+    kb_link_status = Column(String(20), nullable=True, default="active")  # "active" | "orphaned"
+    sub_status = Column(String(20), nullable=True)  # 内部子状态: drafting/parsing/reviewing/ready
     ai_draft = Column(JSON, nullable=True)  # AI raw parse result with confidence/source/warnings
     policy_json = Column(JSON, nullable=True)  # final executable rules
     ai_parse_metadata = Column(JSON, nullable=True)  # {model, tokens, parse_time_ms}
@@ -227,3 +230,18 @@ class PolicyVersion(Base):
     archived_at = Column(DateTime, nullable=True)
 
     policy = relationship("Policy", back_populates="versions")
+
+
+class PolicyTransition(Base):
+    """专用于 Policy / PolicyVersion 状态变更记录（不影响现有报销 status_transitions）"""
+    __tablename__ = "policy_transitions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_type = Column(String(50), nullable=False)  # "policy" | "policy_version"
+    entity_id = Column(String(100), nullable=False)
+    from_status = Column(String(20), nullable=True)
+    to_status = Column(String(20), nullable=False)
+    triggered_by = Column(String(50), nullable=False)  # "user_publish" | "user_activate" | "system_supersede"
+    actor_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=func.now())

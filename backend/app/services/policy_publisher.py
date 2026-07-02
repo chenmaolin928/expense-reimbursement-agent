@@ -71,32 +71,25 @@ class PolicyPublisher:
             db.close()
 
     def rollback_publish(self, version_id: int) -> bool:
-        """Rollback a published version back to REVIEWING status. Only works if not yet superseded."""
-        from app.infrastructure.orm import Policy, PolicyVersion
-        from app.domain.enums import PolicyStatus
+        """DEPRECATED: Use PolicyLifecycleService.activate_version() instead.
 
-        db = self._session_factory()
+        Kept for backward compatibility — maps to activate_version logic.
+        """
+        from app.services.policy_lifecycle import PolicyLifecycleService
+        from app.database import SessionLocal
+        db = SessionLocal()
         try:
-            version = db.query(PolicyVersion).filter(PolicyVersion.id == version_id).first()
-            if not version or version.status != PolicyStatus.PUBLISHED:
-                return False
-
-            policy = db.query(Policy).filter(Policy.id == version.policy_id).first()
-            if not policy:
-                return False
-
-            # Only rollback if this is still the current version
-            if policy.current_version_id != version.id:
-                return False
-
-            version.status = PolicyStatus.REVIEWING
-            version.published_at = None
-            policy.status = PolicyStatus.REVIEWING
-            policy.current_version_id = None
-            db.commit()
-            return True
+            lifecycle = PolicyLifecycleService(db)
+            result = lifecycle.activate_version(
+                policy_id=0,  # resolved inside
+                version_id=version_id,
+                actor_id=0,
+            )
+            return result.success
         except Exception:
             db.rollback()
             return False
+        finally:
+            db.close()
         finally:
             db.close()

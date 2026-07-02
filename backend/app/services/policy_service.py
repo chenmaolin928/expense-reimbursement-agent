@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from app.domain.enums import PolicyStatus
+from app.domain.enums import PolicyStatus, SUB_STATUS_PARSING, SUB_STATUS_REVIEWING
 
 
 class PolicyService:
@@ -40,7 +40,7 @@ class PolicyService:
                 name=name or filename.rsplit(".", 1)[0],
                 description=f"Policy from {filename}",
                 policy_type="expense",
-                status=PolicyStatus.PARSING,
+                status=PolicyStatus.DRAFT,
                 enterprise=enterprise,
                 created_by=created_by,
             )
@@ -54,7 +54,8 @@ class PolicyService:
                 pdf_filename=filename,
                 pdf_path="",
                 pdf_content=pdf_text,
-                status=PolicyStatus.PARSING,
+                status=PolicyStatus.DRAFT,
+                sub_status=SUB_STATUS_PARSING,
                 created_by=created_by,
             )
             db.add(version)
@@ -69,11 +70,12 @@ class PolicyService:
             parser = PolicyParserService()
             draft = parser.parse_for_draft(pdf_text)
 
-            # 6. Save draft & mark reviewing
+            # 6. Save draft
             db.refresh(version)
             version.ai_draft = draft
-            version.status = PolicyStatus.REVIEWING
-            policy.status = PolicyStatus.REVIEWING
+            version.status = PolicyStatus.DRAFT
+            version.sub_status = SUB_STATUS_REVIEWING
+            policy.status = PolicyStatus.DRAFT
             db.commit()
 
             return {
@@ -107,7 +109,8 @@ class PolicyService:
             parser = PolicyParserService()
             draft = parser.parse_for_draft(version.pdf_content)
             version.ai_draft = draft
-            version.status = PolicyStatus.REVIEWING
+            version.status = PolicyStatus.DRAFT
+            version.sub_status = SUB_STATUS_REVIEWING
             db.commit()
             return draft
         finally:

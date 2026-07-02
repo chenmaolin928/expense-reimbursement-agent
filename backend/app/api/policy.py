@@ -32,6 +32,8 @@ from app.schemas.policy import (
 from app.services.policy_parser_service import PolicyParserService
 from app.services.policy_repository import PolicyRepository
 from app.services.policy_service import PolicyService
+from app.services.policy_lifecycle import PolicyLifecycleService
+from app.domain.enums import InvalidPolicyTransitionError
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -267,6 +269,43 @@ def archive_version(
     if not ok:
         raise HTTPException(status_code=404, detail="Version not found")
     return {"message": "Archived"}
+
+
+@router.post("/{policy_id}/versions/{version_id}/activate")
+def activate_policy_version(
+    policy_id: int,
+    version_id: int,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Activate a specific version (publish draft, rollback archived, or confirm active).
+
+    - DRAFT with policy_json → PUBLISHED
+    - ARCHIVED → PUBLISHED (rollback)
+    - PUBLISHED → no-op (version is already active)
+
+    Side effect: previous active version is automatically archived.
+    """
+    require_admin(auth)
+    lifecycle = PolicyLifecycleService(db)
+    try:
+        result = lifecycle.activate_version(
+            policy_id=policy_id,
+            version_id=version_id,
+            actor_id=auth["user_id"],
+        )
+        if not result.success:
+            raise HTTPException(status_code=404, detail=result.message)
+        return {
+            "success": result.success,
+            "message": result.message,
+            "previous_active_version_id": result.previous_active_version_id,
+            "transition_id": result.transition_id,
+        }
+    except InvalidPolicyTransitionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ponytail: placed after numeric {policy_id} routes so FastAPI matches integers first

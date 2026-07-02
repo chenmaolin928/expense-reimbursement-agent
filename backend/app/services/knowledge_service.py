@@ -10,11 +10,28 @@ Architecture:
 
 import os
 import logging
+from dataclasses import dataclass, field
+from datetime import datetime
 from sqlalchemy.orm import Session
-from app.infrastructure.orm import KnowledgeBase, KnowledgeDocument
+from app.infrastructure.orm import KnowledgeBase, KnowledgeDocument, PolicyVersion
+from app.domain.enums import PolicyStatus
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Soft-delete result type
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SoftDeleteKBResult:
+    """Result of a knowledge base soft-delete operation."""
+    success: bool
+    reason: str = ""
+    linked_published_version_ids: list[int] = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Chunking
@@ -159,6 +176,7 @@ class KnowledgeService:
         return self.db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
 
     def delete_base(self, kb_id: int) -> bool:
+        """Hard delete — only used for tests. Use soft_delete_kb for production."""
         kb = self.get_base(kb_id)
         if not kb:
             return False
@@ -167,6 +185,57 @@ class KnowledgeService:
         # Remove all chunks from ChromaDB
         self._delete_chunks_by_kb(kb_id)
         return True
+
+    # --- Soft Delete (production) ---
+
+    def soft_delete_kb(self, kb_id: int) -> "SoftDeleteKBResult":
+        """Soft-delete a knowledge base with dependency checking.
+
+        - Blocks deletion if KB has linked PUBLISHED PolicyVersions.
+        - Unbinds non-published PolicyVersions (sets kb_id = None, kb_link_status = "orphaned").
+        - Marks KB as is_active = False.
+        """
+        kb = self.get_base(kb_id)
+        if not kb:
+            return SoftDeleteKBResult(success=False, reason="KB not found")
+
+        # Dependency check: linked PUBLISHED versions
+        published = self._get_linked_published_versions(kb_id)
+        if published:
+            return SoftDeleteKBResult(
+                success=False,
+                reason=f"KB #{kb_id} 关联了 {len(published)} 个已发布版本，不可删除",
+                linked_published_version_ids=[v.id for v in published],
+            )
+
+        # Unbind non-published versions
+        self._unset_orphaned_versions(kb_id)
+
+        # Soft-delete KB itself
+        kb.is_active = False
+        kb.deactivated_at = datetime.utcnow()
+        self.db.flush()
+        return SoftDeleteKBResult(success=True, reason=f"KB #{kb_id} 已软删除")
+
+    def _get_linked_published_versions(self, kb_id: int):
+        return (
+            self.db.query(PolicyVersion)
+            .filter(
+                PolicyVersion.kb_id == kb_id,
+                PolicyVersion.status == PolicyStatus.PUBLISHED,
+            )
+            .all()
+        )
+
+    def _unset_orphaned_versions(self, kb_id: int):
+        versions = (
+            self.db.query(PolicyVersion)
+            .filter(PolicyVersion.kb_id == kb_id)
+            .all()
+        )
+        for v in versions:
+            v.kb_id = None
+            v.kb_link_status = "orphaned"
 
     # --- Document CRUD ---
 

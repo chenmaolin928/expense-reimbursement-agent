@@ -142,6 +142,19 @@ def _extract_text(filename: str, content_bytes: bytes) -> tuple[str, dict]:
             first_result = result
             first_quality = quality
 
+        # OCR output that contains CJK characters is accepted directly
+        # (short OCR text is legitimate — e.g. a few lines of invoice text)
+        if strategy == "ocr" and any("一" <= c <= "鿿" for c in result):
+            return result, {
+                "processing_chain": "ocr_extract",
+                "quality_assessment": {
+                    "confidence": quality.confidence,
+                    "char_count": quality.char_count,
+                    "garbled_ratio": quality.garbled_ratio,
+                    "recommendation": "force_ocr",
+                },
+            }
+
         # If quality is high enough, accept immediately
         if quality.recommendation == "direct_llm":
             return result, {
@@ -319,7 +332,7 @@ def list_knowledge_bases(db: Session = Depends(get_db)):
     ]
 
 
-@router.delete("/bases/{kb_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/bases/{kb_id}")
 def delete_knowledge_base(
     kb_id: int, db: Session = Depends(get_db),
     auth: dict = Depends(_parse_auth_header),
@@ -327,9 +340,19 @@ def delete_knowledge_base(
     if auth["role"] != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
     svc = get_knowledge_service(db)
-    if not svc.delete_base(kb_id):
-        raise HTTPException(status_code=404, detail="知识库不存在")
-    return None
+    result = svc.soft_delete_kb(kb_id)
+    if not result.success:
+        if result.reason == "KB not found":
+            raise HTTPException(status_code=404, detail="知识库不存在")
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "KB_HAS_PUBLISHED_VERSIONS",
+                "message": result.reason,
+                "linked_version_ids": result.linked_published_version_ids,
+            },
+        )
+    return {"success": True, "message": result.reason}
 
 
 # --- Documents ---

@@ -68,7 +68,7 @@ class PolicyRepository:
                 return None
             version = session.query(PolicyVersion).filter(
                 PolicyVersion.policy_id == policy.id,
-                PolicyVersion.status.in_([PolicyStatus.DRAFT, PolicyStatus.REVIEWING]),
+                PolicyVersion.status.in_([PolicyStatus.DRAFT]),
             ).order_by(PolicyVersion.version_number.desc()).first()
             return version.ai_draft if version else None
         finally:

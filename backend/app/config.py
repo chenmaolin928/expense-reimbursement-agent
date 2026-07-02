@@ -47,7 +47,7 @@ class KBSettings(BaseSettings):
 
 class OCRSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-    engine: str = Field(default="easyocr", alias="ocr_engine")
+    engine: str = Field(default="paddleocr", alias="ocr_engine")
 
 
 class AgentSettings(BaseSettings):

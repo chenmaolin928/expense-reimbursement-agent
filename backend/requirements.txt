@@ -23,8 +23,9 @@ python-docx>=1.0.0
 chromadb>=0.5.0
 sentence-transformers>=3.0.0
 
-# OCR
-easyocr>=1.7.0
+# OCR — PaddleOCR 在独立 venv 中运行，见 paddle_ocr_worker/
+# 主进程只保留图像处理和 PDF 渲染所需依赖：
+opencv-python>=4.8.0
 PyMuPDF>=1.24.0
 
 # Dev / Test
