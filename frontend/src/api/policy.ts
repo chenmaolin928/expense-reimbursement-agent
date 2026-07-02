@@ -125,6 +125,16 @@ export interface PolicyDoc {
   domains: PolicyDomain[]
 }
 
+// ---- Rule Review / Audit types ----
+
+export interface RuleReview {
+  rule_id: string
+  domain_id: string
+  status: 'confirmed' | 'pending_review' | 'invalid'
+  notes?: string
+  updated_at?: string
+}
+
 export const policyApi = {
   async uploadPdf(file: File, name?: string, autoPublish?: boolean, enterprise?: string): Promise<PolicyUploadResponse> {
     const form = new FormData()
@@ -171,7 +181,7 @@ export const policyApi = {
     return res.data
   },
 
-  async publish(policyId: number, versionId: number): Promise<PublishResponse> {
+  async publish(policyId: number, versionId: number): Promise<PolicyPublishResponse> {
     const res = await api.post(`/policy/${policyId}/versions/${versionId}/publish`)
     return res.data
   },
@@ -188,6 +198,38 @@ export const policyApi = {
 
   async getCurrent(): Promise<any> {
     const res = await api.get('/policy/current')
+    return res.data
+  },
+
+  // ---- Rule Review / Audit ----
+
+  async getOriginalText(policyId: number, versionId: number): Promise<{ text: string; version_id: number }> {
+    const res = await api.get(`/policy/${policyId}/versions/${versionId}/original-text`)
+    return res.data
+  },
+
+  async updateRule(policyId: number, versionId: number, domainId: string, ruleId: string, updates: any): Promise<any> {
+    const res = await api.put(`/policy/${policyId}/versions/${versionId}/rules/${domainId}/${ruleId}`, updates)
+    return res.data
+  },
+
+  async splitRule(policyId: number, versionId: number, req: any): Promise<any> {
+    const res = await api.post(`/policy/${policyId}/versions/${versionId}/rules/split`, req)
+    return res.data
+  },
+
+  async mergeRules(policyId: number, versionId: number, req: any): Promise<any> {
+    const res = await api.post(`/policy/${policyId}/versions/${versionId}/rules/merge`, req)
+    return res.data
+  },
+
+  async deleteRule(policyId: number, versionId: number, domainId: string, ruleId: string): Promise<any> {
+    const res = await api.delete(`/policy/${policyId}/versions/${versionId}/rules/${domainId}/${ruleId}`)
+    return res.data
+  },
+
+  async batchUpdateReview(policyId: number, versionId: number, req: any): Promise<any> {
+    const res = await api.put(`/policy/${policyId}/versions/${versionId}/review/batch`, req)
     return res.data
   },
 }

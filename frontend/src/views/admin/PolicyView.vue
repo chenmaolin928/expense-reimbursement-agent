@@ -65,6 +65,18 @@
           v{{ v.version_number }}
           <span :class="['status-dot', v.status]" />
         </button>
+        <!-- Review entry button for draft versions with parsed domains -->
+        <button v-if="hasReviewableVersion" @click="goToReview" class="tab tab-review">
+          🔍 审核
+        </button>
+      </div>
+
+      <!-- AI parse failure notification + re-parse button -->
+      <div v-if="showReparse" class="reparse-banner">
+        <p>⚠️ AI 解析失败，未提取到费用规则。</p>
+        <button @click="doReparse" :disabled="reparsing" class="btn-secondary btn-reparse">
+          {{ reparsing ? '重新解析中...' : '🔄 重新 AI 解析' }}
+        </button>
       </div>
 
       <!-- Draft editor — new format (domains → rules) -->
@@ -269,8 +281,11 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { policyApi, type PolicyListItem, type PolicyVersionItem, type PolicyVersionDetail, type PolicyDraft, type DraftExpenseType, type PolicyDomain, type PolicyRule, type PolicyDoc } from '../../api/policy'
 import { kbApi } from '../../api/knowledge'
+
+const router = useRouter()
 
 const policies = ref<PolicyListItem[]>([])
 const selectedPolicyId = ref<number | null>(null)
@@ -281,6 +296,7 @@ const uploading = ref(false)
 const normalizing = ref(false)
 const publishing = ref(false)
 const activating = ref(false)
+const reparsing = ref(false)
 
 // New format state
 const domains = reactive<PolicyDomain[]>([])
@@ -308,6 +324,17 @@ const usingNewFormat = computed(() => {
 
 const domainCount = computed(() => domains.length)
 const ruleCount = computed(() => domains.reduce((s: number, d: PolicyDomain) => s + d.rules.length, 0))
+
+const hasReviewableVersion = computed(() => {
+  return selectedVersionId.value && versionDetail.value?.ai_draft?.policy_doc?.domains?.length > 0
+    && versionDetail.value.status === 'draft'
+})
+
+const showReparse = computed(() => {
+  return selectedVersionId.value && versionDetail.value?.status === 'draft'
+    && (!versionDetail.value?.ai_draft?.policy_doc?.domains?.length
+      || versionDetail.value.ai_draft.policy_doc.domains.every((d: PolicyDomain) => !d.rules?.length))
+})
 
 onMounted(loadPolicies)
 
@@ -475,6 +502,30 @@ function doActivate() {
     .finally(() => activating.value = false)
 }
 
+function doReparse() {
+  if (!selectedPolicyId.value || !selectedVersionId.value) return
+  reparsing.value = true
+  errorMsg.value = ''
+  policyApi.reparse(selectedPolicyId.value, selectedVersionId.value)
+    .then(() => policyApi.getVersion(selectedPolicyId.value!, selectedVersionId.value!))
+    .then(v => {
+      versionDetail.value = v
+      domains.length = 0
+      legacyExpenseTypes.length = 0
+      if (v.ai_draft?.policy_doc?.domains) {
+        for (const d of v.ai_draft.policy_doc.domains) {
+          domains.push({ ...d })
+        }
+      } else if (v.ai_draft?.expense_types) {
+        for (const et of v.ai_draft.expense_types) {
+          legacyExpenseTypes.push({ ...et })
+        }
+      }
+    })
+    .catch((e: any) => { errorMsg.value = e.response?.data?.detail || '重新解析失败' })
+    .finally(() => reparsing.value = false)
+}
+
 function loadCurrentKb(kbId: number) {
   Promise.all([
     kbApi.listBases().then(all => all.find(b => b.id === kbId) || null),
@@ -490,6 +541,12 @@ function clearCurrentKb() {
   currentKbDocs.value = []
   kbSearchQ.value = ''
   kbSearchResults.value = []
+}
+
+function goToReview() {
+  if (!selectedPolicyId.value || !selectedVersionId.value) return
+  const { href } = router.resolve({ path: `/admin/policy/review/${selectedPolicyId.value}/${selectedVersionId.value}` })
+  window.open(href, '_blank')
 }
 
 function doKbSearch() {
@@ -583,6 +640,8 @@ function formatDate(d: string | null): string {
 }
 .tab:hover { background: rgba(255,255,255,0.04); color: #e4e4e7; }
 .tab.active { background: rgba(99,102,241,0.1); border-color: rgba(99,102,241,0.2); color: #a5b4fc; }
+.tab-review { background: rgba(99,102,241,0.15); border-color: rgba(99,102,241,0.25); color: #818cf8; font-weight: 600; }
+.tab-review:hover { background: rgba(99,102,241,0.25); color: #a5b4fc; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
 .status-dot.draft { background: rgba(255,255,255,0.3); }
 .status-dot.published { background: #34d399; }

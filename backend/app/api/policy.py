@@ -28,6 +28,10 @@ from app.schemas.policy import (
     UpdateDraftRequest,
     NormalizeResponse,
     PublishResponse,
+    RuleUpdateRequest,
+    RuleSplitRequest,
+    RuleMergeRequest,
+    BatchReviewUpdate,
 )
 from app.services.policy_parser_service import PolicyParserService
 from app.services.policy_repository import PolicyRepository
@@ -313,6 +317,127 @@ def activate_policy_version(
         raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# Rule Review / Audit endpoints
+# ============================================================================
+
+
+@router.get("/{policy_id}/versions/{version_id}/original-text")
+def get_original_text(
+    policy_id: int,
+    version_id: int,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Return the original uploaded policy text for visual audit."""
+    svc = PolicyService()
+    text = svc.get_original_text(version_id)
+    if text is None:
+        raise HTTPException(status_code=404, detail="Version not found or has no text")
+    return {"text": text, "version_id": version_id}
+
+
+@router.put("/{policy_id}/versions/{version_id}/rules/{domain_id}/{rule_id}")
+def update_rule(
+    policy_id: int,
+    version_id: int,
+    domain_id: str,
+    rule_id: str,
+    req: RuleUpdateRequest,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Update a single rule's fields and/or review status."""
+    require_admin(auth)
+    svc = PolicyService()
+    updates = req.model_dump(exclude_none=True)
+    draft = svc.update_single_rule(version_id, domain_id, rule_id, updates)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return {"message": "Rule updated", "ai_draft": draft}
+
+
+@router.post("/{policy_id}/versions/{version_id}/rules/split")
+def split_rule(
+    policy_id: int,
+    version_id: int,
+    req: RuleSplitRequest,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Split a compound rule into multiple atomic rules."""
+    require_admin(auth)
+    svc = PolicyService()
+    draft = svc.split_rule(
+        version_id, req.domain_id, req.source_rule_id,
+        [s.model_dump() for s in req.splits],
+    )
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Rule not found or split failed")
+    return {"message": "Rule split", "ai_draft": draft}
+
+
+@router.post("/{policy_id}/versions/{version_id}/rules/merge")
+def merge_rules(
+    policy_id: int,
+    version_id: int,
+    req: RuleMergeRequest,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Merge multiple rules into one."""
+    require_admin(auth)
+    svc = PolicyService()
+    if len(req.source_rule_ids) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 rules to merge")
+    draft = svc.merge_rules(
+        version_id, req.domain_id, req.source_rule_ids,
+        {"type": req.target_type, "title": req.target_title,
+         "condition": req.target_condition, "value": req.target_value,
+         "unit": req.target_unit},
+    )
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Rules not found or merge failed")
+    return {"message": "Rules merged", "ai_draft": draft}
+
+
+@router.delete("/{policy_id}/versions/{version_id}/rules/{domain_id}/{rule_id}")
+def delete_rule(
+    policy_id: int,
+    version_id: int,
+    domain_id: str,
+    rule_id: str,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Delete a rule from the draft."""
+    require_admin(auth)
+    svc = PolicyService()
+    ok = svc.delete_rule(version_id, domain_id, rule_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return {"message": "Rule deleted"}
+
+
+@router.put("/{policy_id}/versions/{version_id}/review/batch")
+def batch_update_review(
+    policy_id: int,
+    version_id: int,
+    req: BatchReviewUpdate,
+    auth: dict = Depends(_parse_auth_header),
+    db: Session = Depends(get_db),
+):
+    """Batch save all review statuses and rule edits."""
+    require_admin(auth)
+    svc = PolicyService()
+    reviews_dict = {k: v.model_dump() for k, v in req.reviews.items()}
+    rule_updates_list = [u.model_dump(exclude_none=True) for u in req.rule_updates]
+    draft = svc.batch_update_review(version_id, reviews_dict, rule_updates_list)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {"message": "Review saved", "ai_draft": draft}
 
 
 # ponytail: placed after numeric {policy_id} routes so FastAPI matches integers first

@@ -20,6 +20,7 @@ const routes = [
       { path: '', redirect: '/admin/knowledge' },
       { path: 'knowledge', component: () => import('../views/admin/KnowledgeView.vue') },
       { path: 'policy', component: () => import('../views/admin/PolicyView.vue') },
+      { path: 'policy/review/:policyId/:versionId', component: () => import('../views/admin/PolicyReviewView.vue') },
       { path: 'analytics', component: () => import('../views/admin/AnalyticsView.vue') },
       ...(devMode
         ? [{ path: 'debug', component: () => import('../views/admin/DevDebugView.vue') }]

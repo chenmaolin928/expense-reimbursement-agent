@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -209,4 +210,72 @@ class RawPolicyDoc(BaseModel):
     title: str = Field(default="", description="Document title")
     version: str = Field(default="", description="Document version")
     domains: list[PolicyDomain] = Field(default_factory=list)
+
+
+# ===========================================================================
+# Rule Review / Audit schemas (Phase 6)
+# ===========================================================================
+
+class RuleReviewStatus(str, Enum):
+    """Per-rule review status during human audit."""
+    CONFIRMED = "confirmed"
+    PENDING_REVIEW = "pending_review"
+    INVALID = "invalid"
+
+
+class RuleReview(BaseModel):
+    """Per-rule review audit record stored in draft .reviews."""
+    rule_id: str
+    domain_id: str
+    status: RuleReviewStatus = Field(default=RuleReviewStatus.PENDING_REVIEW)
+    notes: str = ""
+    updated_at: str = ""
+
+
+class RuleUpdateRequest(BaseModel):
+    """Update a single rule's fields + review status."""
+    domain_id: str
+    rule_id: str
+    type: Optional[str] = Field(default=None, pattern=r"^(limit|ratio|approval|requirement|restriction|other)$")
+    title: Optional[str] = None
+    scope: Optional[RuleScope] = None
+    condition: Optional[str] = None
+    value: Optional[float] = None
+    unit: Optional[str] = None
+    review_status: Optional[RuleReviewStatus] = None
+    review_notes: Optional[str] = None
+
+
+class SplitTarget(BaseModel):
+    """One target rule when splitting a compound rule."""
+    type: str = Field(..., pattern=r"^(limit|ratio|approval|requirement|restriction|other)$")
+    title: str = ""
+    scope: RuleScope = Field(default_factory=RuleScope)
+    condition: str = ""
+    value: Optional[float] = None
+    unit: str = ""
+
+
+class RuleSplitRequest(BaseModel):
+    """Split a compound rule into multiple atomic rules."""
+    domain_id: str
+    source_rule_id: str
+    splits: list[SplitTarget]
+
+
+class RuleMergeRequest(BaseModel):
+    """Merge multiple rules into one."""
+    domain_id: str
+    source_rule_ids: list[str]
+    target_type: str = Field(..., pattern=r"^(limit|ratio|approval|requirement|restriction|other)$")
+    target_title: str = ""
+    target_condition: str = ""
+    target_value: Optional[float] = None
+    target_unit: str = ""
+
+
+class BatchReviewUpdate(BaseModel):
+    """Batch save all review changes at once."""
+    reviews: dict[str, RuleReview] = Field(default_factory=dict)
+    rule_updates: list[RuleUpdateRequest] = Field(default_factory=list)
 

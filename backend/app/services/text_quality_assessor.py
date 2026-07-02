@@ -45,23 +45,24 @@ class TextQualityAssessor:
 
     # Characters considered "normal" — ASCII printable, CJK unified ideographs,
     # CJK symbols and punctuation, fullwidth forms, common whitespace.
+    # NOTE: U+FFFD (�) is the Unicode REPLACEMENT CHARACTER — it is NOT normal.
     NORMAL_PATTERN = re.compile(
         r'[\x20-\x7E'           # ASCII printable
         r'一-鿿'         # CJK Unified Ideographs
-        r'　-〿'         # CJK Symbols and Punctuation
-        r'＀-￯'         # Fullwidth Forms
+        r'　-￿'          # CJK Symbols and Punctuation, Fullwidth Forms
         r'\n\r\t'                # Common whitespace
         r']'
     )
 
     # Characters that *are not* normal — used to detect garbled content.
+    # Also explicitly includes the replacement character U+FFFD.
     GARBLED_PATTERN = re.compile(
         r'[^\x20-\x7E'
         r'一-鿿'
-        r'　-〿'
-        r'＀-￯'
+        r'　-￿'
         r'\n\r\t'
         r']'
+        r'|�'
     )
 
     # Minimum meaningful content to skip direct OCR (50 CJK chars ≈ 2-3 sentences)

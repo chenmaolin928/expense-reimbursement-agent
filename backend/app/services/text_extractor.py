@@ -55,7 +55,7 @@ def is_garbled(text: str) -> bool:
 
     total = len(visible_chars)
     high_byte = sum(1 for c in visible_chars if ord(c) > 127)
-    cjk = sum(1 for c in visible_chars if "一" <= c <= "鿿")
+    cjk = sum(1 for c in visible_chars if "一" <= c <= "鿿" or "㐀" <= c <= "䶿")
     control_chars = sum(
         1
         for c in visible_chars
@@ -63,6 +63,7 @@ def is_garbled(text: str) -> bool:
     )
     replacement_chars = stripped.count(REPLACEMENT_CHAR)
 
+    # Hard garbled markers
     if control_chars > 0 or replacement_chars > 0:
         return True
 
@@ -287,18 +288,34 @@ def extract_text(
         if quality.recommendation == "force_ocr":
             continue
 
-    # All strategies exhausted → fallback to first result
-    if first_result:
-        return first_result, {
-            "processing_chain": "fallback",
-            "quality_assessment": {
-                "confidence": first_quality.confidence if first_quality else 0.0,
-                "char_count": first_quality.char_count if first_quality else len(first_result.strip()),
-                "garbled_ratio": first_quality.garbled_ratio if first_quality else 0.0,
-                "recommendation": first_quality.recommendation if first_quality else "fallback",
-            },
-        }
+    # All strategies exhausted → raise error if result is still garbled
+    if first_result and first_quality:
+        if first_quality.recommendation in ("direct_llm",):
+            return first_result, {
+                "processing_chain": "fallback",
+                "quality_assessment": {
+                    "confidence": first_quality.confidence,
+                    "char_count": first_quality.char_count,
+                    "garbled_ratio": first_quality.garbled_ratio,
+                    "recommendation": "fallback",
+                },
+            }
+        # For "ocr_merge" or "force_ocr" recommendations, OCR should have fixed it
+        # but didn't → the file is likely a scanned image PDF without OCR available.
+        # Raise a clear error instead of passing garbled text to the LLM.
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=400,
+            detail="该PDF无法提取有效文本（可能是扫描件且OCR不可用）。"
+                   "请上传带可选文本层的PDF，或粘贴文本为.txt文件。",
+        )
 
     from fastapi import HTTPException
 
-    raise HTTPException(status_code=400, detail="无法从文件中提取文本内容")
+    raise HTTPException(
+        status_code=400,
+        detail="无法从文件中提取有效文本。该文件可能是扫描件或图片型PDF，请尝试："
+               "1) 将内容复制到.txt文件后上传；"
+               "2) 使用带可选文本层的PDF。",
+    )
